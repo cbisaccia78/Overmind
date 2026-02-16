@@ -1,6 +1,6 @@
 # Overmind (Local-First Agent Control Plane)
 
-This repository now contains a runnable single-process app with:
+Repo contains a runnable single-process app with:
 - Agent Registry (CRUD + version increments)
 - Deterministic Orchestrator (step loop, retries, step limit)
 - Tool Gateway (allowlist + audit log)
