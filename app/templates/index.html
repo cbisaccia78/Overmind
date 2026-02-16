@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="hero card">
+  <div>
+    <p class="eyebrow">Overmind Command Center</p>
+    <h2>Build, run, and observe autonomous workflows with control.</h2>
+    <p class="muted">The app provides a deterministic orchestrator, auditable tool gateway, Docker sandbox execution, and replayable run timelines.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="button primary" href="/agents">Manage Agents</a>
+    <a class="button" href="/runs">View Runs</a>
+  </div>
+</section>
+
+<section class="stats-grid">
+  <article class="card stat">
+    <p class="stat-label">Active Agents</p>
+    <p class="stat-value">{{ agents_count }}</p>
+  </article>
+  <article class="card stat">
+    <p class="stat-label">Total Runs</p>
+    <p class="stat-value">{{ runs_count }}</p>
+  </article>
+  <article class="card stat">
+    <p class="stat-label">Docker Sandbox</p>
+    <p class="stat-value {% if docker_available %}good{% else %}bad{% endif %}">
+      {% if docker_available %}Online{% else %}Unavailable{% endif %}
+    </p>
+  </article>
+</section>
+
+<section class="card">
+  <h3>What this dashboard tracks</h3>
+  <ul class="bullet-list">
+    <li>Agent registry and lifecycle state</li>
+    <li>Run timelines with step-by-step state transitions</li>
+    <li>Tool call audit events, outputs, and latencies</li>
+  </ul>
+</section>
+{% endblock %}

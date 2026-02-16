@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="page-head">
+  <h2>Runs</h2>
+  <p class="muted">Launch deterministic tasks and inspect lifecycle, tools, and logs.</p>
+</section>
+
+<section class="card">
+  <h3>Create Run</h3>
+  {% if agents|length == 0 %}
+  <p class="muted">Create at least one agent before starting a run.</p>
+  <a class="button primary" href="/agents">Create Agent</a>
+  {% else %}
+  <form method="post" action="/runs" class="form-grid">
+    <label>Agent
+      <select name="agent_id">
+        {% for agent in agents %}
+        <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.status }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Task <input name="task" value="shell:echo hello overmind" /></label>
+    <label>Step limit <input name="step_limit" type="number" min="1" max="100" value="8" /></label>
+    <button type="submit" class="button primary">Start Run</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h3>Recent Runs</h3>
+  <table class="data-table">
+    <thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+        <td>{{ run.task }}</td>
+        <td><span class="pill {% if run.status == 'succeeded' %}pill-good{% elif run.status == 'failed' %}pill-bad{% elif run.status == 'running' %}pill-warn{% else %}pill-neutral{% endif %}">{{ run.status }}</span></td>
+        <td>{{ run.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

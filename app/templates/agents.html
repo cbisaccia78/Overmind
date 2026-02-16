@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="page-head">
+  <h2>Agents</h2>
+  <p class="muted">Define operator profiles, allowed tools, and model configuration.</p>
+</section>
+
+<section class="card">
+  <h3>Create Agent</h3>
+  <form method="post" action="/agents" class="form-grid">
+    <label>Name <input name="name" placeholder="release-manager" /></label>
+    <label>Role <input name="role" value="operator" /></label>
+    <label>Model <input name="model" value="stub-v1" /></label>
+    <label>Tools (comma-separated)
+      <input name="tools" value="run_shell,read_file,write_file,store_memory,search_memory" />
+    </label>
+    <button type="submit" class="button primary">Create Agent</button>
+  </form>
+</section>
+
+<section class="card">
+  <h3>Registered Agents</h3>
+  <table class="data-table">
+    <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Version</th><th>Tools</th></tr></thead>
+    <tbody>
+      {% for agent in agents %}
+      <tr>
+        <td>{{ agent.name }}</td>
+        <td>{{ agent.role }}</td>
+        <td><span class="pill {% if agent.status == 'active' %}pill-good{% else %}pill-bad{% endif %}">{{ agent.status }}</span></td>
+        <td>{{ agent.version }}</td>
+        <td>{{ agent.tools_allowed|join(', ') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

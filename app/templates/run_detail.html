@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="page-head">
+  <h2>Run Detail</h2>
+  <p class="muted">Replay run progression across steps, tool calls, and emitted events.</p>
+</section>
+
+<section class="card">
+  <h3>Run {{ run.id }}</h3>
+  <div class="meta-grid">
+    <p><span class="muted">Status</span><br /><span class="pill {% if run.status == 'succeeded' %}pill-good{% elif run.status == 'failed' %}pill-bad{% elif run.status == 'running' %}pill-warn{% else %}pill-neutral{% endif %}">{{ run.status }}</span></p>
+    <p><span class="muted">Task</span><br />{{ run.task }}</p>
+  </div>
+</section>
+
+<section class="card">
+  <h3>Steps</h3>
+  <ul class="timeline">
+    {% for step in steps %}
+      <li class="timeline-item">
+        <p><strong>#{{ step.idx }}</strong> <span class="pill pill-neutral">{{ step.type }}</span></p>
+        <p class="muted">started {{ step.started_at }}</p>
+        {% if step.error %}<div class="error">Error: {{ step.error }}</div>{% endif %}
+        {% if step.output_json %}<pre>{{ step.output_json }}</pre>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h3>Tool Calls</h3>
+  <ul class="timeline">
+    {% for tc in tool_calls %}
+      <li class="timeline-item">
+        <p><strong>{{ tc.tool_name }}</strong> <span class="muted">{{ tc.created_at }}</span></p>
+        <p>
+          <span class="pill {% if tc.allowed %}pill-good{% else %}pill-bad{% endif %}">allowed={{ tc.allowed }}</span>
+          <span class="pill pill-neutral">{{ tc.latency_ms }}ms</span>
+        </p>
+        <details><summary>Args/Result</summary><pre>{{ tc.args_json }}
+{{ tc.result_json }}</pre></details>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h3>Events</h3>
+  <ul class="timeline">
+    {% for e in events %}
+      <li class="timeline-item">
+        <p><strong>{{ e.type }}</strong> <span class="muted">{{ e.ts }}</span></p>
+        <pre>{{ e.payload_json }}</pre>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}
