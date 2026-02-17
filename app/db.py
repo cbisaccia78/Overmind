@@ -181,6 +181,8 @@ def init_db(db_path: str) -> None:
       collection TEXT NOT NULL,
       text TEXT NOT NULL,
       embedding TEXT NOT NULL,
+      embedding_model TEXT NOT NULL DEFAULT 'fts5-bm25',
+      dims INTEGER NOT NULL DEFAULT 0,
       metadata_json TEXT,
       created_at TEXT NOT NULL
     );
@@ -203,3 +205,64 @@ def init_db(db_path: str) -> None:
     """
     with get_conn(db_path) as conn:
         conn.executescript(schema)
+        _ensure_memory_item_columns(conn)
+        _ensure_memory_fts(conn)
+
+
+def _ensure_memory_item_columns(conn: sqlite3.Connection) -> None:
+    """Ensure newer memory_items columns exist for older DB files."""
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()
+    }
+    if "embedding_model" not in cols:
+        conn.execute(
+            "ALTER TABLE memory_items ADD COLUMN embedding_model TEXT NOT NULL DEFAULT 'fts5-bm25'"
+        )
+    if "dims" not in cols:
+        conn.execute(
+            "ALTER TABLE memory_items ADD COLUMN dims INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_memory_fts(conn: sqlite3.Connection) -> None:
+    """Create and backfill FTS5 index for memory text, if supported."""
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
+            USING fts5(id UNINDEXED, collection UNINDEXED, text)
+            """
+        )
+        conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS memory_items_ai AFTER INSERT ON memory_items BEGIN
+              INSERT INTO memory_items_fts(id, collection, text)
+              VALUES (new.id, new.collection, new.text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memory_items_ad AFTER DELETE ON memory_items BEGIN
+              INSERT INTO memory_items_fts(memory_items_fts, rowid, id, collection, text)
+              VALUES('delete', old.rowid, old.id, old.collection, old.text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memory_items_au AFTER UPDATE ON memory_items BEGIN
+              INSERT INTO memory_items_fts(memory_items_fts, rowid, id, collection, text)
+              VALUES('delete', old.rowid, old.id, old.collection, old.text);
+              INSERT INTO memory_items_fts(id, collection, text)
+              VALUES (new.id, new.collection, new.text);
+            END;
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_items_fts(id, collection, text)
+            SELECT m.id, m.collection, m.text
+            FROM memory_items m
+            WHERE NOT EXISTS (
+              SELECT 1 FROM memory_items_fts f WHERE f.id = m.id
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        pass

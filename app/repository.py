@@ -520,6 +520,8 @@ class Repository:
         collection: str,
         text: str,
         embedding: list[float],
+        embedding_model: str,
+        dims: int,
         metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Persist a memory item and its embedding.
@@ -538,14 +540,16 @@ class Repository:
             "collection": collection,
             "text": text,
             "embedding": embedding,
+            "embedding_model": embedding_model,
+            "dims": dims,
             "metadata_json": metadata or {},
             "created_at": utc_now(),
         }
         with get_conn(self.db_path) as conn:
             conn.execute(
                 """
-                INSERT INTO memory_items(id, collection, text, embedding, metadata_json, created_at)
-                VALUES(:id, :collection, :text, :embedding, :metadata_json, :created_at)
+                INSERT INTO memory_items(id, collection, text, embedding, embedding_model, dims, metadata_json, created_at)
+                VALUES(:id, :collection, :text, :embedding, :embedding_model, :dims, :metadata_json, :created_at)
                 """,
                 {
                     **row,
@@ -572,4 +576,66 @@ class Repository:
         query += " ORDER BY created_at DESC"
         with get_conn(self.db_path) as conn:
             rows = conn.execute(query, args).fetchall()
+        return list(rows)
+
+    def search_memory_candidates(
+        self, collection: str, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Search indexed memory candidates using FTS when available.
+
+        Falls back to a LIKE scan when FTS is unavailable or query is invalid.
+
+        Args:
+            collection: Collection name filter.
+            query: Search query.
+            limit: Maximum candidates to return.
+
+        Returns:
+            Candidate memory rows in relevance/recency order.
+        """
+        q = (query or "").strip()
+        if not q:
+            return self.list_memory_items(collection)[:limit]
+
+        with get_conn(self.db_path) as conn:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT m.*
+                    FROM memory_items_fts f
+                    JOIN memory_items m ON m.id = f.id
+                    WHERE m.collection = ? AND f.text MATCH ?
+                    ORDER BY bm25(memory_items_fts)
+                    LIMIT ?
+                    """,
+                    (collection, q, limit),
+                ).fetchall()
+                if rows:
+                    return list(rows)
+            except Exception:
+                pass
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM memory_items
+                WHERE collection = ? AND text LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (collection, f"%{q}%", limit),
+            ).fetchall()
+            if rows:
+                return list(rows)
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM memory_items
+                WHERE collection = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (collection, limit),
+            ).fetchall()
         return list(rows)

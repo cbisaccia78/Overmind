@@ -36,12 +36,12 @@ def test_repository_noop_paths_and_memory_collection_filter(tmp_path):
     repo.update_run_status(run["id"], "running")
     repo.update_run_status(run["id"], "failed")
 
-    mem = LocalVectorMemory(repo=repo, dims=8)
+    mem = LocalVectorMemory(repo=repo)
     vec = mem.embed("")
-    assert vec == [0.0] * 8
+    assert vec == []
 
-    repo.add_memory_item("docs", "abc", [0.1] * 8, {"k": "v"})
-    repo.add_memory_item("other", "xyz", [0.2] * 8, None)
+    repo.add_memory_item("docs", "abc", [0.1] * 8, "test-embed", 8, {"k": "v"})
+    repo.add_memory_item("other", "xyz", [0.2] * 8, "test-embed", 8, None)
     docs = repo.list_memory_items("docs")
     assert len(docs) == 1
     assert docs[0]["collection"] == "docs"
