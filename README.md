@@ -1,6 +1,7 @@
 # Overmind (Local-First Agent Control Plane)
 
-[![Coverage](https://codecov.io/gh/cbisaccia78/Overmind/branch/main/graph/badge.svg)](https://codecov.io/gh/cbisaccia78/Overmind)
+[![CI](https://github.com/cbisaccia78/Overmind/actions/workflows/ci.yml/badge.svg)](https://github.com/cbisaccia78/Overmind/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/cbisaccia78/overmind/branch/main/graph/badge.svg)](https://app.codecov.io/github/cbisaccia78/overmind)
 
 Repo contains a runnable single-process app with:
 - Agent Registry (CRUD + version increments)
