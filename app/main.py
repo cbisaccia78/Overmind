@@ -52,8 +52,9 @@ class AppState:
 
     Attributes:
         repo: SQLite-backed persistence layer.
-        memory: Deterministic local vector memory.
+        memory: Local memory subsystem (FTS-backed retrieval + optional embeddings).
         docker_runner: Docker sandbox runner.
+        model_gateway: Model inference facade that records audit telemetry.
         gateway: Tool execution gateway.
         orchestrator: Background run orchestrator.
     """

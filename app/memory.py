@@ -137,6 +137,17 @@ class OpenAIEmbeddingBackend(EmbeddingBackend):
         )
 
     def embed(self, text: str) -> list[float]:
+        """Generate a normalized embedding via the OpenAI embeddings API.
+
+        Args:
+            text: Input text to embed.
+
+        Returns:
+            Normalized embedding vector.
+
+        Raises:
+            RuntimeError: If the HTTP request fails or times out.
+        """
         payload = {
             "model": self.model_name,
             "input": text,
@@ -168,11 +179,27 @@ class LocalBm25Backend(EmbeddingBackend):
     dims = 0
 
     def embed(self, text: str) -> list[float]:
+        """Return an empty embedding for lexical-only retrieval.
+
+        Args:
+            text: Input text (unused).
+
+        Returns:
+            Empty list.
+        """
         del text
         return []
 
 
 def _normalize(vec: list[float]) -> list[float]:
+    """Normalize a vector to unit length.
+
+    Args:
+        vec: Raw vector.
+
+    Returns:
+        Unit-normalized vector. If the norm is 0, returns `vec` unchanged.
+    """
     norm = math.sqrt(sum(v * v for v in vec))
     if norm == 0:
         return vec
@@ -180,6 +207,19 @@ def _normalize(vec: list[float]) -> list[float]:
 
 
 def _select_backend() -> EmbeddingBackend:
+    """Select an embedding backend based on environment configuration.
+
+    Selection is controlled by `OVERMIND_EMBEDDING_PROVIDER`:
+    - `auto` (default): Use OpenAI if `OPENAI_API_KEY` is set, else local.
+    - `openai`: Require `OPENAI_API_KEY` and use OpenAI.
+    - Any other value: Force local lexical mode.
+
+    Returns:
+        The selected embedding backend.
+
+    Raises:
+        RuntimeError: If `openai` is selected without `OPENAI_API_KEY`.
+    """
     provider = os.getenv("OVERMIND_EMBEDDING_PROVIDER", "auto").lower()
     if provider in {"auto", "openai"}:
         api_key = os.getenv("OPENAI_API_KEY")

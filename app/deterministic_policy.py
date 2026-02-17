@@ -13,9 +13,19 @@ from .policy import PlanContext, PlannedAction, Policy
 
 
 class DeterministicPolicy(Policy):
-    """Deterministic intent-based policy for tool planning."""
+    """Deterministic intent-based policy for tool planning.
+
+    This policy delegates "model inference" to `ModelGateway` (which may be a
+    real model backend or a deterministic heuristic), then converts the
+    resulting tool decision into a short, fixed action sequence.
+    """
 
     def __init__(self, model_gateway: ModelGateway):
+        """Create a deterministic policy.
+
+        Args:
+            model_gateway: Model inference gateway used to decide the next tool.
+        """
         self.model_gateway = model_gateway
 
     def plan(
@@ -25,6 +35,16 @@ class DeterministicPolicy(Policy):
         agent: dict[str, Any],
         context: PlanContext,
     ) -> list[PlannedAction]:
+        """Plan actions for a task.
+
+        Args:
+            task: Free-form task string.
+            agent: Agent configuration and metadata.
+            context: Planning context (includes run id, limits, etc.).
+
+        Returns:
+            Ordered list of planned actions.
+        """
         normalized = (task or "").strip()
         actions: list[PlannedAction] = [
             PlannedAction(

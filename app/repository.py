@@ -1,7 +1,7 @@
 """SQLite-backed persistence layer.
 
-Implements CRUD operations and audit/event logging for agents, runs,
-steps, tool calls, and memory items.
+Implements CRUD operations and audit/event logging for agents, runs, steps,
+tool calls, model calls, memory items, and events.
 """
 
 from __future__ import annotations
@@ -16,7 +16,8 @@ from .db import get_conn, utc_now
 class Repository:
     """SQLite-backed persistence and query API for Overmind.
 
-    Stores agents, runs, steps, tool calls, memory items, and events.
+    Stores agents, runs, steps, tool calls, model calls, memory items, and
+    events.
 
     Attributes:
         db_path: Filesystem path to the SQLite database.
@@ -530,6 +531,8 @@ class Repository:
             collection: Logical collection name.
             text: Text to store.
             embedding: Vector embedding.
+            embedding_model: Embedding model identifier (or retrieval mode).
+            dims: Embedding dimensionality.
             metadata: Optional metadata payload.
 
         Returns:

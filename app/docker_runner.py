@@ -17,7 +17,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Execution constraints for docker sandbox runs."""
+    """Execution constraints for docker sandbox runs.
+
+    Attributes:
+        backend: Sandbox backend identifier (currently only "docker").
+        enforce_pinned_image: If True, require images pinned by digest.
+        pids_limit: Container PID limit.
+        writable_tmp_mb: Size of a writable `/tmp` tmpfs in MB.
+    """
 
     backend: str = "docker"
     enforce_pinned_image: bool = False
@@ -34,6 +41,7 @@ class DockerRunner:
         default_timeout_s: Default command timeout in seconds.
         memory_limit: Docker memory limit.
         cpu_limit: Docker CPU limit.
+        sandbox: Additional sandbox hardening configuration.
     """
 
     def __init__(

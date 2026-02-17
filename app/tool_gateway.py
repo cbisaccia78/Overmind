@@ -1,7 +1,8 @@
 """Tool execution gateway.
 
-Enforces an agent allowlist, dispatches supported tools (files, memory,
-Docker shell), and records tool call audit events.
+Enforces an agent allowlist, validates tool arguments against per-tool schemas,
+dispatches supported tools (files, memory, Docker shell), and records tool call
+audit events.
 """
 
 from __future__ import annotations
