@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
-from app.docker_runner import DockerRunner
+from app.docker_runner import DockerRunner, SandboxConfig
 
 
 def test_is_available_branches(monkeypatch, tmp_path):
@@ -34,16 +34,21 @@ def test_is_available_branches(monkeypatch, tmp_path):
 
 def test_run_shell_unavailable(monkeypatch, tmp_path):
     runner = DockerRunner(workspace_root=str(tmp_path))
-    monkeypatch.setattr(runner, "is_available", lambda: False)
+    monkeypatch.setattr(
+        runner,
+        "_probe_docker",
+        lambda: (False, {"reason": "docker_info_timeout"}),
+    )
 
     result = runner.run_shell("echo hi")
     assert result["ok"] is False
     assert result["error"]["code"] == "docker_unavailable"
+    assert result["error"]["details"]["reason"] == "docker_info_timeout"
 
 
 def test_run_shell_success_and_writable_mount(monkeypatch, tmp_path):
     runner = DockerRunner(workspace_root=str(tmp_path))
-    monkeypatch.setattr(runner, "is_available", lambda: True)
+    monkeypatch.setattr(runner, "_probe_docker", lambda: (True, None))
 
     captured = {}
 
@@ -58,6 +63,7 @@ def test_run_shell_success_and_writable_mount(monkeypatch, tmp_path):
         timeout_s=3,
         allow_write=True,
         write_subdir="work",
+        run_id="r1",
     )
     assert result["ok"] is True
     assert result["exit_code"] == 0
@@ -72,7 +78,7 @@ def test_run_shell_success_and_writable_mount(monkeypatch, tmp_path):
 
 def test_run_shell_blocks_escape_and_handles_timeout(monkeypatch, tmp_path):
     runner = DockerRunner(workspace_root=str(tmp_path))
-    monkeypatch.setattr(runner, "is_available", lambda: True)
+    monkeypatch.setattr(runner, "_probe_docker", lambda: (True, None))
 
     captured = {}
 
@@ -98,3 +104,36 @@ def test_run_shell_blocks_escape_and_handles_timeout(monkeypatch, tmp_path):
     assert timeout_result["ok"] is False
     assert timeout_result["error"]["code"] == "timeout"
     assert timeout_result["command"] == "sleep 3"
+
+
+def test_run_shell_enforces_pinned_image_when_configured(tmp_path):
+    runner = DockerRunner(
+        workspace_root=str(tmp_path),
+        image="alpine:3.20",
+        sandbox=SandboxConfig(enforce_pinned_image=True),
+    )
+
+    result = runner.run_shell("echo hi")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "image_not_pinned"
+
+
+def test_run_shell_uses_per_run_workdir_by_default(monkeypatch, tmp_path):
+    runner = DockerRunner(workspace_root=str(tmp_path))
+    monkeypatch.setattr(runner, "_probe_docker", lambda: (True, None))
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("app.docker_runner.subprocess.run", fake_run)
+    result = runner.run_shell(command="echo hi", allow_write=True, run_id="run-123")
+    assert result["ok"] is True
+
+    mount_parts = [
+        part for part in captured["cmd"] if ":/workspace_writable:rw" in part
+    ]
+    assert len(mount_parts) == 1
+    assert ".overmind_runs/run-123" in mount_parts[0]
