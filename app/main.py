@@ -26,6 +26,7 @@ from .db import init_db, resolve_db_path
 from .deterministic_policy import DeterministicPolicy
 from .docker_runner import DockerRunner
 from .memory import LocalVectorMemory
+from .model_gateway import ModelGateway
 from .orchestrator import Orchestrator
 from .policy import Policy
 from .repository import Repository
@@ -78,7 +79,8 @@ class AppState:
         self.repo = Repository(db_path)
         self.memory = LocalVectorMemory(self.repo)
         self.docker_runner = DockerRunner(workspace_root=workspace)
-        self.policy = policy or DeterministicPolicy()
+        self.model_gateway = ModelGateway(self.repo)
+        self.policy = policy or DeterministicPolicy(model_gateway=self.model_gateway)
         self.gateway = ToolGateway(
             repo=self.repo,
             memory=self.memory,

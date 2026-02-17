@@ -45,3 +45,30 @@ def test_repository_noop_paths_and_memory_collection_filter(tmp_path):
     docs = repo.list_memory_items("docs")
     assert len(docs) == 1
     assert docs[0]["collection"] == "docs"
+
+
+def test_repository_model_call_roundtrip(tmp_path):
+    db_path = str(tmp_path / "repo-model.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+
+    agent = repo.create_agent("n", "r", "stub-v1", ["store_memory"])
+    run = repo.create_run(agent["id"], "remember:notes:test", step_limit=2)
+
+    created = repo.create_model_call(
+        run_id=run["id"],
+        agent_id=agent["id"],
+        model="stub-v1",
+        request_json={"task": "remember:notes:test"},
+        response_json={"tool_name": "store_memory", "args": {"collection": "notes"}},
+        usage_json={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        error=None,
+        latency_ms=12,
+    )
+
+    assert created["model"] == "stub-v1"
+    rows = repo.list_model_calls(run["id"])
+    assert len(rows) == 1
+    assert rows[0]["request_json"]["task"] == "remember:notes:test"
+    assert rows[0]["response_json"]["tool_name"] == "store_memory"
+    assert rows[0]["usage_json"]["total_tokens"] == 5

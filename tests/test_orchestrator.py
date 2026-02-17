@@ -39,3 +39,7 @@ def test_orchestrator_step_accounting(client):
     steps = client.get(f"/api/runs/{run['id']}/steps").json()
     assert len(steps) == 3  # plan -> tool -> eval
     assert [s["idx"] for s in steps] == [0, 1, 2]
+
+    model_calls = client.app.state.services.repo.list_model_calls(run["id"])
+    assert len(model_calls) >= 1
+    assert model_calls[0]["model"] == agent["model"]

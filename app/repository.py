@@ -400,6 +400,75 @@ class Repository:
             row["allowed"] = bool(row["allowed"])
         return list(rows)
 
+    def create_model_call(
+        self,
+        run_id: str | None,
+        agent_id: str | None,
+        model: str,
+        request_json: dict[str, Any],
+        response_json: dict[str, Any],
+        usage_json: dict[str, Any],
+        error: str | None,
+        latency_ms: int,
+    ) -> dict[str, Any]:
+        """Persist a model call audit record.
+
+        Args:
+            run_id: Optional run ID associated with this model call.
+            agent_id: Optional agent ID for the call.
+            model: Model identifier used for inference.
+            request_json: Request payload sent to the model.
+            response_json: Response payload returned by the model.
+            usage_json: Usage/telemetry payload (tokens, etc.).
+            error: Optional error string for failed calls.
+            latency_ms: Call latency in milliseconds.
+
+        Returns:
+            The stored model call row as a dict.
+        """
+        row = {
+            "id": self._id(),
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "model": model,
+            "request_json": request_json,
+            "response_json": response_json,
+            "usage_json": usage_json,
+            "error": error,
+            "latency_ms": latency_ms,
+            "created_at": utc_now(),
+        }
+        with get_conn(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO model_calls(id, run_id, agent_id, model, request_json, response_json, usage_json, error, latency_ms, created_at)
+                VALUES(:id, :run_id, :agent_id, :model, :request_json, :response_json, :usage_json, :error, :latency_ms, :created_at)
+                """,
+                {
+                    **row,
+                    "request_json": json.dumps(row["request_json"]),
+                    "response_json": json.dumps(row["response_json"]),
+                    "usage_json": json.dumps(row["usage_json"]),
+                },
+            )
+        return row
+
+    def list_model_calls(self, run_id: str) -> list[dict[str, Any]]:
+        """List model calls for a run in chronological order.
+
+        Args:
+            run_id: Run ID.
+
+        Returns:
+            List of model call rows.
+        """
+        with get_conn(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM model_calls WHERE run_id=? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+        return list(rows)
+
     def create_event(
         self,
         run_id: str | None,

@@ -161,6 +161,21 @@ def init_db(db_path: str) -> None:
       FOREIGN KEY(step_id) REFERENCES steps(id)
     );
 
+    CREATE TABLE IF NOT EXISTS model_calls (
+      id TEXT PRIMARY KEY,
+      run_id TEXT,
+      agent_id TEXT,
+      model TEXT NOT NULL,
+      request_json TEXT,
+      response_json TEXT,
+      usage_json TEXT,
+      error TEXT,
+      latency_ms INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES runs(id),
+      FOREIGN KEY(agent_id) REFERENCES agents(id)
+    );
+
     CREATE TABLE IF NOT EXISTS memory_items (
       id TEXT PRIMARY KEY,
       collection TEXT NOT NULL,
@@ -182,6 +197,7 @@ def init_db(db_path: str) -> None:
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
     CREATE INDEX IF NOT EXISTS idx_steps_run_idx ON steps(run_id, idx);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
+    CREATE INDEX IF NOT EXISTS idx_model_calls_run ON model_calls(run_id);
     CREATE INDEX IF NOT EXISTS idx_events_run_ts ON events(run_id, ts);
     CREATE INDEX IF NOT EXISTS idx_memory_collection ON memory_items(collection);
     """
