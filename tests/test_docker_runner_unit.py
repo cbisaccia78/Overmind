@@ -25,6 +25,12 @@ def test_is_available_branches(monkeypatch, tmp_path):
     )
     assert runner.is_available() is True
 
+    def _raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=3)
+
+    monkeypatch.setattr("app.docker_runner.subprocess.run", _raise_timeout)
+    assert runner.is_available() is False
+
 
 def test_run_shell_unavailable(monkeypatch, tmp_path):
     runner = DockerRunner(workspace_root=str(tmp_path))

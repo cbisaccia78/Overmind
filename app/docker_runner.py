@@ -56,14 +56,17 @@ class DockerRunner:
         """
         if shutil.which("docker") is None:
             return False
-        probe = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-        return probe.returncode == 0
+        try:
+            probe = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            return probe.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
 
     def run_shell(
         self,
