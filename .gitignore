@@ -9,3 +9,5 @@ __pycache__/
 *.db
 data/
 */playright-mcp
+*.egg-info/
+.coverage

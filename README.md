@@ -1,5 +1,7 @@
 # Overmind (Local-First Agent Control Plane)
 
+[![Coverage](https://codecov.io/gh/cbisaccia78/Overmind/branch/main/graph/badge.svg)](https://codecov.io/gh/cbisaccia78/Overmind)
+
 Repo contains a runnable single-process app with:
 - Agent Registry (CRUD + version increments)
 - Deterministic Orchestrator (step loop, retries, step limit)

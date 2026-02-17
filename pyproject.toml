@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "overmind"
 version = "0.1.0"
@@ -13,8 +17,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.4.2",
+  "pytest-cov>=5.0.0",
   "httpx>=0.28.1",
 ]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["data*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
