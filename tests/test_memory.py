@@ -25,7 +25,11 @@ def test_memory_search_ranking(client):
 def test_memory_stores_embedding_metadata_and_candidates(client):
     client.post(
         "/api/memory/store",
-        json={"collection": "docs", "text": "vector search sqlite", "metadata": {"k": "v"}},
+        json={
+            "collection": "docs",
+            "text": "vector search sqlite",
+            "metadata": {"k": "v"},
+        },
     )
 
     repo = client.app.state.services.repo

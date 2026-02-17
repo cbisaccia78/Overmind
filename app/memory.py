@@ -187,5 +187,7 @@ def _select_backend() -> EmbeddingBackend:
             model_name = os.getenv("OVERMIND_EMBEDDING_MODEL", "text-embedding-3-small")
             return OpenAIEmbeddingBackend(api_key=api_key, model_name=model_name)
         if provider == "openai":
-            raise RuntimeError("OPENAI_API_KEY is required for OVERMIND_EMBEDDING_PROVIDER=openai")
+            raise RuntimeError(
+                "OPENAI_API_KEY is required for OVERMIND_EMBEDDING_PROVIDER=openai"
+            )
     return LocalBm25Backend()
