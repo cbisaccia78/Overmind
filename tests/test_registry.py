@@ -2,6 +2,16 @@ from __future__ import annotations
 
 
 def test_agent_registry_crud(client):
+    missing_model = client.post(
+        "/api/agents",
+        json={
+            "name": "coder",
+            "role": "dev",
+            "tools_allowed": ["read_file"],
+        },
+    )
+    assert missing_model.status_code == 422
+
     create = client.post(
         "/api/agents",
         json={

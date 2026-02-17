@@ -7,6 +7,9 @@
 
 <section class="card">
   <h3>Create Run</h3>
+  {% if run_error %}
+  <p class="pill pill-bad">{{ run_error }}</p>
+  {% endif %}
   {% if agents|length == 0 %}
   <p class="muted">Create at least one agent before starting a run.</p>
   <a class="button primary" href="/agents">Create Agent</a>
@@ -15,12 +18,12 @@
     <label>Agent
       <select name="agent_id">
         {% for agent in agents %}
-        <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.status }})</option>
+        <option value="{{ agent.id }}" {% if run_form_values.agent_id == agent.id %}selected{% endif %}>{{ agent.name }} ({{ agent.status }})</option>
         {% endfor %}
       </select>
     </label>
-    <label>Task <input name="task" value="shell:echo hello overmind" /></label>
-    <label>Step limit <input name="step_limit" type="number" min="1" max="100" value="8" /></label>
+    <label>Task <input name="task" value="{{ run_form_values.task }}" /></label>
+    <label>Step limit <input name="step_limit" type="number" min="1" max="100" value="{{ run_form_values.step_limit }}" /></label>
     <button type="submit" class="button primary">Start Run</button>
   </form>
   {% endif %}

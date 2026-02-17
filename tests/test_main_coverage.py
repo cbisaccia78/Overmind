@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 def test_health_and_not_found_branches(client):
     health = client.get("/health")
     assert health.status_code == 200
@@ -109,12 +110,25 @@ def test_call_tool_agent_missing_branch(client, monkeypatch):
 
 
 def test_ui_form_and_run_routes_full_branches(client):
+    missing_model = client.post(
+        "/agents",
+        data={
+            "name": "missing-model-agent",
+            "role": "operator",
+            "model": "",
+            "tools": "read_file",
+        },
+        follow_redirects=False,
+    )
+    assert missing_model.status_code == 422
+    assert "Name, role, and model are required" in missing_model.text
+
     created = client.post(
         "/agents",
         data={
             "name": "form-agent",
             "role": "operator",
-            "model": "stub-v1",
+            "model": "example-model-v1",
             "tools": "read_file, write_file",
         },
         follow_redirects=False,
@@ -131,24 +145,36 @@ def test_ui_form_and_run_routes_full_branches(client):
         data={"agent_id": "", "task": "", "step_limit": "2"},
         follow_redirects=False,
     )
-    assert no_task.status_code == 303
-    assert no_task.headers["location"] == "/runs"
+    assert no_task.status_code == 422
+    assert "Agent is required" in no_task.text
 
     missing_id_with_agents = client.post(
         "/runs",
         data={"agent_id": "", "task": "shell:echo hi", "step_limit": "2"},
         follow_redirects=False,
     )
-    assert missing_id_with_agents.status_code == 303
-    assert missing_id_with_agents.headers["location"] == "/runs"
+    assert missing_id_with_agents.status_code == 422
+    assert "Agent is required" in missing_id_with_agents.text
+
+    missing_task = client.post(
+        "/runs",
+        data={
+            "agent_id": client.get("/api/agents").json()[0]["id"],
+            "task": "",
+            "step_limit": "2",
+        },
+        follow_redirects=False,
+    )
+    assert missing_task.status_code == 422
+    assert "Task is required" in missing_task.text
 
     invalid_id = client.post(
         "/runs",
         data={"agent_id": "not-real", "task": "shell:echo hi", "step_limit": "2"},
         follow_redirects=False,
     )
-    assert invalid_id.status_code == 303
-    assert invalid_id.headers["location"] == "/runs"
+    assert invalid_id.status_code == 422
+    assert "Selected agent does not exist" in invalid_id.text
 
     valid_id = client.get("/api/agents").json()[0]["id"]
     ok = client.post(

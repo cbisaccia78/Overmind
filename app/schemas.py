@@ -20,9 +20,9 @@ class AgentCreate(BaseModel):
         tools_allowed: List of tool names the agent can invoke.
     """
 
-    name: str
-    role: str
-    model: str = "stub-v1"
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    model: str = Field(min_length=1)
     tools_allowed: list[str] = Field(default_factory=list)
 
 

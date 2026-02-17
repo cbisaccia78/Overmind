@@ -6,10 +6,10 @@
 Repo contains a runnable single-process app with:
 - Agent Registry (CRUD + version increments)
 - Deterministic Orchestrator (step loop, retries, step limit)
-- Tool Gateway (allowlist + audit log)
+- Tool Gateway (allowlist + strict arg validation + audit log)
 - Docker Sandbox Runner (real container execution)
-- Vector Memory (deterministic local embeddings + search)
-- Structured Logs/Telemetry (events + replay timeline)
+- Memory (FTS-backed retrieval + optional embeddings)
+- Structured Logs/Telemetry (events + replay timeline + tool/model call audit)
 - Minimal Web Dashboard (agents, runs, run detail)
 
 ## Architecture
@@ -36,7 +36,8 @@ SQLite tables implemented in [app/db.py](app/db.py):
 - `runs(id, agent_id, task, status, step_limit, created_at, started_at, finished_at)`
 - `steps(id, run_id, idx, type, input_json, output_json, started_at, finished_at, error)`
 - `tool_calls(id, run_id, step_id, tool_name, args_json, result_json, allowed, latency_ms, created_at)`
-- `memory_items(id, collection, text, embedding, metadata_json, created_at)`
+- `model_calls(id, run_id, agent_id, model, request_json, response_json, usage_json, error, latency_ms, created_at)`
+- `memory_items(id, collection, text, embedding, embedding_model, dims, metadata_json, created_at)`
 - `events(id, run_id, type, payload_json, ts)`
 
 ## Setup and Run
@@ -52,6 +53,10 @@ Environment variables:
 
 - `OVERMIND_DB`: SQLite DB path (default: `data/overmind.db`).
 - `OVERMIND_WORKSPACE`: Workspace root used to constrain file tools (defaults to the repo root).
+- `OVERMIND_EMBEDDING_PROVIDER`: `auto` (default), `openai` (requires `OPENAI_API_KEY`), or any other value to force local FTS/BM25 mode.
+- `OPENAI_API_KEY`: Optional; if set (and provider is `auto`/`openai`), memory embeddings are generated via OpenAI.
+- `OVERMIND_EMBEDDING_MODEL`: OpenAI embedding model name (default: `text-embedding-3-small`).
+- `OVERMIND_OPENAI_EMBEDDINGS_URL`: Optional override for the embeddings endpoint.
 
 Tests:
 
@@ -103,5 +108,7 @@ Tool Gateway:
 - `--network none`
 - `--cpus 0.5`
 - `--memory 256m`
-- read-only workspace mount by default; explicit writable mount optional
+- `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`
+- `--pids-limit 128`, `--tmpfs /tmp:rw,size=64m`
+- read-only workspace mount by default; optional per-run writable mount at `/workspace_writable`
 - subprocess-level timeout enforcement

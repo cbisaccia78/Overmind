@@ -22,5 +22,5 @@ def test_runs_requires_agent_before_start(client):
         data={"task": "shell:echo hi", "step_limit": "8"},
         follow_redirects=False,
     )
-    assert post.status_code == 303
-    assert post.headers.get("location") == "/agents"
+    assert post.status_code == 422
+    assert "Create at least one agent before starting a run" in post.text

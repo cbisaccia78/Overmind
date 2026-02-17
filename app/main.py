@@ -17,6 +17,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
@@ -504,12 +505,23 @@ def agents_page(request: Request) -> HTMLResponse:
         HTML response.
     """
     return templates.TemplateResponse(
-        request, "agents.html", {"agents": _services().repo.list_agents()}
+        request,
+        "agents.html",
+        {
+            "agents": _services().repo.list_agents(),
+            "form_error": None,
+            "form_values": {
+                "name": "",
+                "role": "operator",
+                "model": "",
+                "tools": "run_shell,read_file,write_file,store_memory,search_memory",
+            },
+        },
     )
 
 
 @app.post("/agents", response_class=HTMLResponse)
-async def create_agent_form(request: Request) -> RedirectResponse:
+async def create_agent_form(request: Request) -> Response:
     """Handle agent creation from the HTML form.
 
     Args:
@@ -519,13 +531,33 @@ async def create_agent_form(request: Request) -> RedirectResponse:
         Redirect response to the agents page.
     """
     form = await _parse_urlencoded_form(request)
+    name = form.get("name", "").strip()
+    role = form.get("role", "").strip()
+    model = form.get("model", "").strip()
+    tools = form.get("tools", "")
+
+    if not name or not role or not model:
+        return templates.TemplateResponse(
+            request,
+            "agents.html",
+            {
+                "agents": _services().repo.list_agents(),
+                "form_error": "Name, role, and model are required.",
+                "form_values": {
+                    "name": name,
+                    "role": role,
+                    "model": model,
+                    "tools": tools,
+                },
+            },
+            status_code=422,
+        )
+
     _services().repo.create_agent(
-        name=form.get("name", "sample-agent"),
-        role=form.get("role", "operator"),
-        model=form.get("model", "stub-v1"),
-        tools_allowed=[
-            x.strip() for x in form.get("tools", "").split(",") if x.strip()
-        ],
+        name=name,
+        role=role,
+        model=model,
+        tools_allowed=[x.strip() for x in tools.split(",") if x.strip()],
     )
     return RedirectResponse(url="/agents", status_code=303)
 
@@ -544,12 +576,21 @@ def runs_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "runs.html",
-        {"runs": repo.list_runs(), "agents": repo.list_agents()},
+        {
+            "runs": repo.list_runs(),
+            "agents": repo.list_agents(),
+            "run_error": None,
+            "run_form_values": {
+                "agent_id": "",
+                "task": "shell:echo hello overmind",
+                "step_limit": "8",
+            },
+        },
     )
 
 
 @app.post("/runs", response_class=HTMLResponse)
-async def create_run_form(request: Request) -> RedirectResponse:
+async def create_run_form(request: Request) -> Response:
     """Handle run creation from the HTML form.
 
     Args:
@@ -561,20 +602,100 @@ async def create_run_form(request: Request) -> RedirectResponse:
     form = await _parse_urlencoded_form(request)
     repo = _services().repo
     agent_id = form.get("agent_id", "").strip()
-    task = form.get("task", "")
-    if not task:
-        return RedirectResponse(url="/runs", status_code=303)
+    task = form.get("task", "").strip()
+    step_limit_raw = form.get("step_limit", "8").strip() or "8"
+    run_form_values = {
+        "agent_id": agent_id,
+        "task": task,
+        "step_limit": step_limit_raw,
+    }
+
+    agents = repo.list_agents()
+    if not agents:
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {
+                "runs": repo.list_runs(),
+                "agents": agents,
+                "run_error": "Create at least one agent before starting a run.",
+                "run_form_values": run_form_values,
+            },
+            status_code=422,
+        )
+
     if not agent_id:
-        if not repo.list_agents():
-            return RedirectResponse(url="/agents", status_code=303)
-        return RedirectResponse(url="/runs", status_code=303)
-    if not repo.get_agent(agent_id):
-        return RedirectResponse(url="/runs", status_code=303)
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {
+                "runs": repo.list_runs(),
+                "agents": agents,
+                "run_error": "Agent is required.",
+                "run_form_values": run_form_values,
+            },
+            status_code=422,
+        )
+
+    if not task:
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {
+                "runs": repo.list_runs(),
+                "agents": agents,
+                "run_error": "Task is required.",
+                "run_form_values": run_form_values,
+            },
+            status_code=422,
+        )
+
+    agent = repo.get_agent(agent_id)
+    if not agent:
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {
+                "runs": repo.list_runs(),
+                "agents": agents,
+                "run_error": "Selected agent does not exist.",
+                "run_form_values": run_form_values,
+            },
+            status_code=422,
+        )
+
+    try:
+        step_limit = int(step_limit_raw)
+    except ValueError:
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {
+                "runs": repo.list_runs(),
+                "agents": agents,
+                "run_error": "Step limit must be an integer between 1 and 100.",
+                "run_form_values": run_form_values,
+            },
+            status_code=422,
+        )
+
+    if step_limit < 1 or step_limit > 100:
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {
+                "runs": repo.list_runs(),
+                "agents": agents,
+                "run_error": "Step limit must be between 1 and 100.",
+                "run_form_values": run_form_values,
+            },
+            status_code=422,
+        )
 
     run = repo.create_run(
         agent_id=agent_id,
         task=task,
-        step_limit=int(form.get("step_limit", "8")),
+        step_limit=step_limit,
     )
     repo.create_event(run["id"], "run.queued", {"run_id": run["id"], "task": task})
     _services().orchestrator.launch(run["id"])

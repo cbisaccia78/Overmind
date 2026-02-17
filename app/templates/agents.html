@@ -7,12 +7,15 @@
 
 <section class="card">
   <h3>Create Agent</h3>
+  {% if form_error %}
+  <p class="pill pill-bad">{{ form_error }}</p>
+  {% endif %}
   <form method="post" action="/agents" class="form-grid">
-    <label>Name <input name="name" placeholder="release-manager" /></label>
-    <label>Role <input name="role" value="operator" /></label>
-    <label>Model <input name="model" value="stub-v1" /></label>
+    <label>Name <input name="name" placeholder="release-manager" value="{{ form_values.name }}" /></label>
+    <label>Role <input name="role" value="{{ form_values.role }}" /></label>
+    <label>Model (required) <input name="model" placeholder="example: gpt-4.1-mini" value="{{ form_values.model }}" /></label>
     <label>Tools (comma-separated)
-      <input name="tools" value="run_shell,read_file,write_file,store_memory,search_memory" />
+      <input name="tools" value="{{ form_values.tools }}" />
     </label>
     <button type="submit" class="button primary">Create Agent</button>
   </form>
