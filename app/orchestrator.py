@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .policy import StubPolicy
+from .policy import Policy
 from .repository import Repository
 from .tool_gateway import ToolGateway
 
@@ -36,7 +36,7 @@ class Orchestrator:
         self,
         repo: Repository,
         tool_gateway: ToolGateway,
-        policy: StubPolicy,
+        policy: Policy,
         retry_config: RetryConfig | None = None,
     ):
         """Create an orchestrator instance.
@@ -99,7 +99,11 @@ class Orchestrator:
             run_id, "run.started", {"run_id": run_id, "agent_id": agent["id"]}
         )
 
-        actions = self.policy.plan(run["task"])
+        actions = self.policy.plan(
+            run["task"],
+            agent=agent,
+            context={"run_id": run_id, "step_limit": run["step_limit"]},
+        )
         step_limit = int(run["step_limit"])
 
         for idx, action in enumerate(actions):

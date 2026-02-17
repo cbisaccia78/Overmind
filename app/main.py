@@ -23,10 +23,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .db import init_db, resolve_db_path
+from .deterministic_policy import DeterministicPolicy
 from .docker_runner import DockerRunner
 from .memory import LocalVectorMemory
 from .orchestrator import Orchestrator
-from .policy import StubPolicy
+from .policy import Policy
 from .repository import Repository
 from .schemas import (
     AgentCreate,
@@ -56,7 +57,10 @@ class AppState:
     """
 
     def __init__(
-        self, db_path: str | None = None, workspace_root: str | None = None
+        self,
+        db_path: str | None = None,
+        workspace_root: str | None = None,
+        policy: Policy | None = None,
     ) -> None:
         """Initialize application services.
 
@@ -74,6 +78,7 @@ class AppState:
         self.repo = Repository(db_path)
         self.memory = LocalVectorMemory(self.repo)
         self.docker_runner = DockerRunner(workspace_root=workspace)
+        self.policy = policy or DeterministicPolicy()
         self.gateway = ToolGateway(
             repo=self.repo,
             memory=self.memory,
@@ -81,12 +86,16 @@ class AppState:
             workspace_root=workspace,
         )
         self.orchestrator = Orchestrator(
-            repo=self.repo, tool_gateway=self.gateway, policy=StubPolicy()
+            repo=self.repo,
+            tool_gateway=self.gateway,
+            policy=self.policy,
         )
 
 
 def create_app(
-    db_path: str | None = None, workspace_root: str | None = None
+    db_path: str | None = None,
+    workspace_root: str | None = None,
+    policy: Policy | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -99,7 +108,9 @@ def create_app(
     """
     application = FastAPI(title="Overmind", version="0.1.0")
     application.state.services = AppState(
-        db_path=db_path, workspace_root=workspace_root
+        db_path=db_path,
+        workspace_root=workspace_root,
+        policy=policy,
     )
     application.mount(
         "/static",

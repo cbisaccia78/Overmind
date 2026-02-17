@@ -1,10 +1,8 @@
-"""Task-to-action policy.
-
-Parses a task string into a deterministic sequence of planned actions.
-"""
+"""Policy types and interfaces for task planning."""
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,87 +22,27 @@ class PlannedAction:
     args: dict[str, Any]
 
 
-class StubPolicy:
-    """Deterministic parser from task string to tool actions."""
+PlanContext = dict[str, Any]
 
-    def plan(self, task: str) -> list[PlannedAction]:
-        """Convert a task string into a deterministic list of planned actions.
+
+class Policy(ABC):
+    """Interface for converting tasks into executable planned actions."""
+
+    @abstractmethod
+    def plan(
+        self,
+        task: str,
+        *,
+        agent: dict[str, Any],
+        context: PlanContext,
+    ) -> list[PlannedAction]:
+        """Build a deterministic or model-assisted action plan for a task.
 
         Args:
-            task: Task string.
+            task: User task string.
+            agent: Agent configuration and metadata for this run.
+            context: Additional planning context (run id, limits, prior state, etc.).
 
         Returns:
-            List of `PlannedAction` items.
+            Ordered list of planned actions.
         """
-        actions: list[PlannedAction] = [
-            PlannedAction(step_type="plan", tool_name=None, args={"task": task})
-        ]
-
-        if task.startswith("shell:"):
-            cmd = task.split("shell:", 1)[1].strip()
-            actions.append(
-                PlannedAction(
-                    step_type="tool", tool_name="run_shell", args={"command": cmd}
-                )
-            )
-        elif task.startswith("read:"):
-            path = task.split("read:", 1)[1].strip()
-            actions.append(
-                PlannedAction(
-                    step_type="tool", tool_name="read_file", args={"path": path}
-                )
-            )
-        elif task.startswith("write:"):
-            payload = task.split("write:", 1)[1]
-            path, _, content = payload.partition(":")
-            actions.append(
-                PlannedAction(
-                    step_type="tool",
-                    tool_name="write_file",
-                    args={"path": path.strip(), "content": content},
-                )
-            )
-        elif task.startswith("remember:"):
-            payload = task.split("remember:", 1)[1]
-            collection, _, text = payload.partition(":")
-            actions.append(
-                PlannedAction(
-                    step_type="tool",
-                    tool_name="store_memory",
-                    args={
-                        "collection": collection.strip() or "default",
-                        "text": text.strip(),
-                    },
-                )
-            )
-        elif task.startswith("recall:"):
-            payload = task.split("recall:", 1)[1]
-            collection, _, query = payload.partition(":")
-            actions.append(
-                PlannedAction(
-                    step_type="tool",
-                    tool_name="search_memory",
-                    args={
-                        "collection": collection.strip() or "default",
-                        "query": query.strip(),
-                        "top_k": 5,
-                    },
-                )
-            )
-        else:
-            actions.append(
-                PlannedAction(
-                    step_type="tool",
-                    tool_name="store_memory",
-                    args={
-                        "collection": "runs",
-                        "text": task,
-                        "metadata": {"source": "task"},
-                    },
-                )
-            )
-
-        actions.append(
-            PlannedAction(step_type="eval", tool_name=None, args={"result": "done"})
-        )
-        return actions

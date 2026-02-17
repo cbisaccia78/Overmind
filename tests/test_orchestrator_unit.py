@@ -46,7 +46,9 @@ def test_orchestrator_fails_when_agent_missing_or_disabled():
     orch_missing = _orchestrator_with(repo_missing, MagicMock(), MagicMock())
     orch_missing.process_run("r1")
     repo_missing.update_run_status.assert_called_with("r1", "failed")
-    repo_missing.create_event.assert_any_call("r1", "run.failed", {"error": "agent_not_found"})
+    repo_missing.create_event.assert_any_call(
+        "r1", "run.failed", {"error": "agent_not_found"}
+    )
 
     repo_disabled = MagicMock()
     repo_disabled.get_run.return_value = {
@@ -60,7 +62,9 @@ def test_orchestrator_fails_when_agent_missing_or_disabled():
     orch_disabled = _orchestrator_with(repo_disabled, MagicMock(), MagicMock())
     orch_disabled.process_run("r2")
     repo_disabled.update_run_status.assert_called_with("r2", "failed")
-    repo_disabled.create_event.assert_any_call("r2", "run.failed", {"error": "agent_disabled"})
+    repo_disabled.create_event.assert_any_call(
+        "r2", "run.failed", {"error": "agent_disabled"}
+    )
 
 
 def test_orchestrator_step_limit_and_mid_run_cancel():
@@ -79,7 +83,9 @@ def test_orchestrator_step_limit_and_mid_run_cancel():
     policy.plan.return_value = [PlannedAction("tool", "store_memory", {"text": "x"})]
     orch_limit = _orchestrator_with(repo_limit, MagicMock(), policy)
     orch_limit.process_run("r1")
-    repo_limit.create_event.assert_any_call("r1", "run.step_limit_reached", {"step_limit": 0})
+    repo_limit.create_event.assert_any_call(
+        "r1", "run.step_limit_reached", {"step_limit": 0}
+    )
     repo_limit.update_run_status.assert_any_call("r1", "failed")
 
     repo_cancel = MagicMock()
@@ -95,7 +101,9 @@ def test_orchestrator_step_limit_and_mid_run_cancel():
     ]
     repo_cancel.get_agent.return_value = {"id": "a2", "status": "active"}
     policy_cancel = MagicMock()
-    policy_cancel.plan.return_value = [PlannedAction("tool", "store_memory", {"text": "x"})]
+    policy_cancel.plan.return_value = [
+        PlannedAction("tool", "store_memory", {"text": "x"})
+    ]
     orch_cancel = _orchestrator_with(repo_cancel, MagicMock(), policy_cancel)
     orch_cancel.process_run("r2")
     repo_cancel.create_event.assert_any_call("r2", "run.canceled", {"run_id": "r2"})
@@ -115,7 +123,11 @@ def test_orchestrator_retry_then_fail_path(monkeypatch):
         },
         {"id": "r3", "status": "running"},
     ]
-    repo.get_agent.return_value = {"id": "a3", "status": "active", "tools_allowed": ["run_shell"]}
+    repo.get_agent.return_value = {
+        "id": "a3",
+        "status": "active",
+        "tools_allowed": ["run_shell"],
+    }
     repo.create_step.return_value = {"id": "s1"}
 
     policy = MagicMock()
@@ -130,16 +142,31 @@ def test_orchestrator_retry_then_fail_path(monkeypatch):
     orch = _orchestrator_with(repo, gateway, policy)
     orch.process_run("r3")
 
+    policy.plan.assert_called_once_with(
+        "t",
+        agent=repo.get_agent.return_value,
+        context={"run_id": "r3", "step_limit": 5},
+    )
     assert gateway.call.call_count == 2
     repo.create_event.assert_any_call(
         "r3",
         "tool.retry",
-        {"step_id": "s1", "tool_name": "run_shell", "attempt": 1, "error": {"message": "fail1"}},
+        {
+            "step_id": "s1",
+            "tool_name": "run_shell",
+            "attempt": 1,
+            "error": {"message": "fail1"},
+        },
     )
     repo.create_event.assert_any_call(
         "r3",
         "tool.retry",
-        {"step_id": "s1", "tool_name": "run_shell", "attempt": 2, "error": {"message": "fail2"}},
+        {
+            "step_id": "s1",
+            "tool_name": "run_shell",
+            "attempt": 2,
+            "error": {"message": "fail2"},
+        },
     )
     repo.finish_step.assert_called_with(
         "s1",
