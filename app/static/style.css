@@ -218,7 +218,7 @@ label {
 	color: #cbd5e1;
 }
 
-input,
+input:not([type="checkbox"]),
 select {
 	width: 100%;
 	border-radius: 10px;
@@ -229,7 +229,57 @@ select {
 	outline: none;
 }
 
-input:focus,
+.field-block {
+	display: grid;
+	gap: 6px;
+}
+
+.field-label {
+	font-size: 0.92rem;
+	color: #cbd5e1;
+}
+
+.tool-picker {
+	display: grid;
+	gap: 8px;
+	padding: 10px;
+	border: 1px solid rgba(148, 163, 184, 0.36);
+	border-radius: 10px;
+	background: rgba(2, 6, 23, 0.72);
+}
+
+label.tool-option {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	justify-content: flex-start;
+	margin: 0;
+	padding: 6px 8px;
+	border-radius: 8px;
+	color: #dbeafe;
+	font-size: 0.9rem;
+	background: rgba(15, 23, 42, 0.52);
+	border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+label.tool-option:has(input:checked) {
+	background: rgba(59, 130, 246, 0.2);
+	border-color: rgba(96, 165, 250, 0.55);
+}
+
+label.tool-option input[type="checkbox"] {
+	width: 1rem;
+	height: 1rem;
+	margin: 0;
+	accent-color: var(--primary-strong);
+}
+
+label.tool-option input[type="checkbox"]:checked + span {
+	color: #bfdbfe;
+	font-weight: 600;
+}
+
+input:not([type="checkbox"]):focus,
 select:focus {
 	border-color: rgba(96, 165, 250, 0.85);
 	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.22);

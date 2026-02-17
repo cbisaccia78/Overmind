@@ -64,9 +64,11 @@ def test_run_collection_endpoints_and_cancel_flow(client):
 
     steps = client.get(f"/api/runs/{run['id']}/steps")
     tool_calls = client.get(f"/api/runs/{run['id']}/tool-calls")
+    model_calls = client.get(f"/api/runs/{run['id']}/model-calls")
     events = client.get(f"/api/runs/{run['id']}/events")
     assert steps.status_code == 200
     assert tool_calls.status_code == 200
+    assert model_calls.status_code == 200
     assert events.status_code == 200
 
     canceled = client.post(f"/api/runs/{run['id']}/cancel")
@@ -116,7 +118,7 @@ def test_ui_form_and_run_routes_full_branches(client):
             "name": "missing-model-agent",
             "role": "operator",
             "model": "",
-            "tools": "read_file",
+            "tools": ["read_file"],
         },
         follow_redirects=False,
     )
@@ -129,7 +131,7 @@ def test_ui_form_and_run_routes_full_branches(client):
             "name": "form-agent",
             "role": "operator",
             "model": "example-model-v1",
-            "tools": "read_file, write_file",
+            "tools": ["read_file", "write_file"],
         },
         follow_redirects=False,
     )
@@ -188,6 +190,7 @@ def test_ui_form_and_run_routes_full_branches(client):
     run_id = ok.headers["location"].rsplit("/", 1)[-1]
     detail = client.get(f"/runs/{run_id}")
     assert detail.status_code == 200
+    assert "Model Calls" in detail.text
 
     missing_detail = client.get("/runs/does-not-exist")
     assert missing_detail.status_code == 404

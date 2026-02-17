@@ -46,6 +46,14 @@ WORKSPACE_ROOT = str(
     Path(os.getenv("OVERMIND_WORKSPACE", Path(__file__).resolve().parents[1])).resolve()
 )
 
+AVAILABLE_TOOLS = [
+    "run_shell",
+    "read_file",
+    "write_file",
+    "store_memory",
+    "search_memory",
+]
+
 
 class AppState:
     """Container for application service singletons.
@@ -81,14 +89,17 @@ class AppState:
         self.repo = Repository(db_path)
         self.memory = LocalVectorMemory(self.repo)
         self.docker_runner = DockerRunner(workspace_root=workspace)
-        self.model_gateway = ModelGateway(self.repo)
-        self.policy = policy or DeterministicPolicy(model_gateway=self.model_gateway)
         self.gateway = ToolGateway(
             repo=self.repo,
             memory=self.memory,
             docker_runner=self.docker_runner,
             workspace_root=workspace,
         )
+        self.model_gateway = ModelGateway(
+            self.repo,
+            openai_tools_provider=self.gateway.list_openai_tools,
+        )
+        self.policy = policy or DeterministicPolicy(model_gateway=self.model_gateway)
         self.orchestrator = Orchestrator(
             repo=self.repo,
             tool_gateway=self.gateway,
@@ -145,6 +156,19 @@ async def _parse_urlencoded_form(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
     parsed = parse_qs(body, keep_blank_values=True)
     return {key: values[-1] if values else "" for key, values in parsed.items()}
+
+
+async def _parse_urlencoded_form_multi(request: Request) -> dict[str, list[str]]:
+    """Parse a URL-encoded form body into a multi-value dictionary.
+
+    Args:
+        request: Incoming request.
+
+    Returns:
+        Mapping of field name to all submitted values for that field.
+    """
+    body = (await request.body()).decode("utf-8")
+    return parse_qs(body, keep_blank_values=True)
 
 
 @app.get("/health")
@@ -352,6 +376,19 @@ def get_run_tool_calls(run_id: str) -> list[dict[str, Any]]:
     return _services().repo.list_tool_calls(run_id)
 
 
+@app.get("/api/runs/{run_id}/model-calls")
+def get_run_model_calls(run_id: str) -> list[dict[str, Any]]:
+    """List model calls for a run.
+
+    Args:
+        run_id: Run ID.
+
+    Returns:
+        List of model call rows.
+    """
+    return _services().repo.list_model_calls(run_id)
+
+
 @app.get("/api/runs/{run_id}/events")
 def get_run_events(run_id: str) -> list[dict[str, Any]]:
     """List events for a run.
@@ -385,6 +422,7 @@ def replay_run(run_id: str) -> StreamingResponse:
 
     steps = repo.list_steps(run_id)
     tool_calls = repo.list_tool_calls(run_id)
+    model_calls = repo.list_model_calls(run_id)
     events = repo.list_events(run_id)
 
     timeline: list[dict[str, Any]] = []
@@ -393,6 +431,10 @@ def replay_run(run_id: str) -> StreamingResponse:
     for item in tool_calls:
         timeline.append(
             {"kind": "tool_call", "ts": item.get("created_at"), "data": item}
+        )
+    for item in model_calls:
+        timeline.append(
+            {"kind": "model_call", "ts": item.get("created_at"), "data": item}
         )
     for item in events:
         timeline.append({"kind": "event", "ts": item.get("ts"), "data": item})
@@ -510,12 +552,13 @@ def agents_page(request: Request) -> HTMLResponse:
         "agents.html",
         {
             "agents": _services().repo.list_agents(),
+            "available_tools": AVAILABLE_TOOLS,
             "form_error": None,
             "form_values": {
                 "name": "",
                 "role": "operator",
                 "model": "",
-                "tools": "run_shell,read_file,write_file,store_memory,search_memory",
+                "tools": list(AVAILABLE_TOOLS),
             },
         },
     )
@@ -531,11 +574,11 @@ async def create_agent_form(request: Request) -> Response:
     Returns:
         Redirect response to the agents page.
     """
-    form = await _parse_urlencoded_form(request)
-    name = form.get("name", "").strip()
-    role = form.get("role", "").strip()
-    model = form.get("model", "").strip()
-    tools = form.get("tools", "")
+    form = await _parse_urlencoded_form_multi(request)
+    name = (form.get("name", [""])[-1]).strip()
+    role = (form.get("role", [""])[-1]).strip()
+    model = (form.get("model", [""])[-1]).strip()
+    tools = [tool.strip() for tool in form.get("tools", []) if tool.strip()]
 
     if not name or not role or not model:
         return templates.TemplateResponse(
@@ -543,6 +586,7 @@ async def create_agent_form(request: Request) -> Response:
             "agents.html",
             {
                 "agents": _services().repo.list_agents(),
+                "available_tools": AVAILABLE_TOOLS,
                 "form_error": "Name, role, and model are required.",
                 "form_values": {
                     "name": name,
@@ -558,7 +602,7 @@ async def create_agent_form(request: Request) -> Response:
         name=name,
         role=role,
         model=model,
-        tools_allowed=[x.strip() for x in tools.split(",") if x.strip()],
+        tools_allowed=tools,
     )
     return RedirectResponse(url="/agents", status_code=303)
 
@@ -726,6 +770,7 @@ def run_detail_page(run_id: str, request: Request) -> HTMLResponse:
             "run": run,
             "steps": repo.list_steps(run_id),
             "tool_calls": repo.list_tool_calls(run_id),
+            "model_calls": repo.list_model_calls(run_id),
             "events": repo.list_events(run_id),
         },
     )

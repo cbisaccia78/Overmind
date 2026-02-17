@@ -158,3 +158,23 @@ def test_dispatch_strict_schema_validation(tmp_path: Path):
     unknown_arg = gateway._dispatch("read_file", {"path": "seed.txt", "extra": True})
     assert unknown_arg["ok"] is False
     assert unknown_arg["error"]["code"] == "bad_args"
+
+
+def test_list_openai_tools_renders_json_schema(tmp_path: Path):
+    gateway = _gateway(tmp_path)
+
+    tools = gateway.list_openai_tools(["run_shell", "read_file"])
+
+    assert len(tools) == 2
+    run_shell = tools[0]
+    assert run_shell["type"] == "function"
+    assert run_shell["function"]["name"] == "run_shell"
+    params = run_shell["function"]["parameters"]
+    assert params["type"] == "object"
+    assert params["additionalProperties"] is False
+    assert "command" in params["required"]
+    assert params["properties"]["timeout_s"]["type"] == "integer"
+
+    read_file = tools[1]
+    assert read_file["function"]["name"] == "read_file"
+    assert read_file["function"]["parameters"]["properties"]["path"]["type"] == "string"

@@ -45,6 +45,25 @@
 </section>
 
 <section class="card">
+  <h3>Model Calls</h3>
+  <ul class="timeline">
+    {% for mc in model_calls %}
+      <li class="timeline-item">
+        <p><strong>{{ mc.model }}</strong> <span class="muted">{{ mc.created_at }}</span></p>
+        <p>
+          <span class="pill {% if mc.error %}pill-bad{% else %}pill-good{% endif %}">{% if mc.error %}error{% else %}ok{% endif %}</span>
+          <span class="pill pill-neutral">{{ mc.latency_ms }}ms</span>
+        </p>
+        <details><summary>Request/Response/Usage</summary><pre>{{ mc.request_json }}
+{{ mc.response_json }}
+{{ mc.usage_json }}</pre></details>
+        {% if mc.error %}<div class="error">Error: {{ mc.error }}</div>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
   <h3>Events</h3>
   <ul class="timeline">
     {% for e in events %}

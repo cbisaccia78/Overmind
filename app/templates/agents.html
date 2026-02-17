@@ -14,9 +14,17 @@
     <label>Name <input name="name" placeholder="release-manager" value="{{ form_values.name }}" /></label>
     <label>Role <input name="role" value="{{ form_values.role }}" /></label>
     <label>Model (required) <input name="model" placeholder="example: gpt-4.1-mini" value="{{ form_values.model }}" /></label>
-    <label>Tools (comma-separated)
-      <input name="tools" value="{{ form_values.tools }}" />
-    </label>
+    <div class="field-block">
+      <span class="field-label">Tools</span>
+      <div class="tool-picker" role="group" aria-label="Tools">
+        {% for tool in available_tools %}
+          <label class="tool-option">
+            <input type="checkbox" name="tools" value="{{ tool }}" {% if tool in form_values.tools %}checked{% endif %} />
+            <span>{{ tool }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    </div>
     <button type="submit" class="button primary">Create Agent</button>
   </form>
 </section>

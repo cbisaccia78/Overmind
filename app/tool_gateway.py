@@ -29,6 +29,14 @@ class ToolSpec:
 class ToolGateway:
     """Authorize and dispatch tool calls, then persist audit records."""
 
+    _TOOL_DESCRIPTIONS: dict[str, str] = {
+        "run_shell": "Run a shell command in a constrained Docker sandbox.",
+        "read_file": "Read a UTF-8 text file from the workspace.",
+        "write_file": "Write UTF-8 text content to a file in the workspace.",
+        "store_memory": "Store a memory item in a named collection.",
+        "search_memory": "Search memory items in a named collection.",
+    }
+
     def __init__(
         self,
         repo: Repository,
@@ -134,6 +142,116 @@ class ToolGateway:
                 handler=self._handle_search_memory,
             ),
         }
+
+    def list_tool_specs(self, tool_names: list[str] | None = None) -> list[ToolSpec]:
+        """List registered tool specs, optionally filtered by name.
+
+        Args:
+            tool_names: Optional list of tool names to include.
+
+        Returns:
+            List of tool specs in registry order.
+        """
+        if tool_names is None:
+            return list(self._tool_registry.values())
+
+        allowed = set(tool_names)
+        return [spec for name, spec in self._tool_registry.items() if name in allowed]
+
+    def list_openai_tools(
+        self, tool_names: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Render registered tools as OpenAI function-calling definitions.
+
+        Args:
+            tool_names: Optional list of tool names to include.
+
+        Returns:
+            List of OpenAI-compatible tool definitions.
+        """
+        tools: list[dict[str, Any]] = []
+        for spec in self.list_tool_specs(tool_names):
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": self._TOOL_DESCRIPTIONS.get(
+                            spec.name,
+                            f"Invoke tool {spec.name}",
+                        ),
+                        "parameters": self._args_schema_to_json_schema(
+                            spec.args_schema
+                        ),
+                    },
+                }
+            )
+        return tools
+
+    def _args_schema_to_json_schema(
+        self, args_schema: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Convert internal arg schema to JSON Schema for function calling.
+
+        Args:
+            args_schema: Internal args schema mapping.
+
+        Returns:
+            JSON Schema object for tool parameters.
+        """
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+
+        for arg_name, rules in args_schema.items():
+            prop = self._rule_to_json_schema(rules)
+            if "default" in rules:
+                prop["default"] = rules["default"]
+            properties[arg_name] = prop
+            if rules.get("required"):
+                required.append(arg_name)
+
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": False,
+        }
+        if required:
+            schema["required"] = required
+        return schema
+
+    @staticmethod
+    def _rule_to_json_schema(rules: dict[str, Any]) -> dict[str, Any]:
+        """Convert one internal argument rule into JSON Schema.
+
+        Args:
+            rules: Rule mapping containing `type`, bounds, and defaults.
+
+        Returns:
+            JSON Schema snippet for one argument.
+        """
+        py_type = rules.get("type")
+        schema: dict[str, Any] = {}
+
+        if py_type is str:
+            schema["type"] = "string"
+            if "min_length" in rules:
+                schema["minLength"] = int(rules["min_length"])
+        elif py_type is int:
+            schema["type"] = "integer"
+            if "min" in rules:
+                schema["minimum"] = int(rules["min"])
+            if "max" in rules:
+                schema["maximum"] = int(rules["max"])
+        elif py_type is bool:
+            schema["type"] = "boolean"
+        elif py_type is dict:
+            schema["type"] = "object"
+        elif py_type == (str, type(None)):
+            schema["anyOf"] = [{"type": "string"}, {"type": "null"}]
+        else:
+            schema["type"] = "string"
+
+        return schema
 
     def _safe_path(self, rel_path: str) -> Path:
         """Resolve a relative path within the workspace root.
@@ -245,9 +363,7 @@ class ToolGateway:
             return validated
         return spec.handler(validated)
 
-    def _validate_args(
-        self, spec: ToolSpec, args: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _validate_args(self, spec: ToolSpec, args: dict[str, Any]) -> dict[str, Any]:
         """Validate and normalize args against a tool schema."""
         unknown = sorted(set(args.keys()) - set(spec.args_schema.keys()))
         if unknown:

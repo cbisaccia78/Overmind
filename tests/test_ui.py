@@ -7,6 +7,7 @@ def test_dashboard_pages_render(client):
 
     agents = client.get("/agents")
     assert agents.status_code == 200
+    assert 'type="checkbox" name="tools"' in agents.text
 
     runs = client.get("/runs")
     assert runs.status_code == 200
