@@ -15,17 +15,20 @@ DOCKER_AVAILABLE = shutil.which("docker") is not None
 def _docker_usable() -> bool:
     if not DOCKER_AVAILABLE:
         return False
-    probe = subprocess.run(
-        ["docker", "info"],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        check=False,
-    )
+    try:
+        probe = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return probe.returncode == 0
 
 
-DOCKER_USABLE = _docker_usable()
+DOCKER_USABLE = _docker_usable() if RUN_DOCKER_TESTS else False
 
 pytestmark = pytest.mark.skipif(
     not RUN_DOCKER_TESTS or not DOCKER_USABLE,
