@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -33,6 +37,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           use_oidc: true
+          slug: cbisaccia78/Overmind
           files: ./coverage.xml
           verbose: true
           fail_ci_if_error: true

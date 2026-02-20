@@ -78,6 +78,34 @@ make package-unpacked
 ```
 
 Packaging note: release artifacts bundle the backend as a standalone executable via PyInstaller. End users do not need Python installed.
+
+## Release Build (GitHub)
+
+To produce a release build and publish installers through GitHub Actions:
+
+1. Bump desktop version in `package.json` to match your next tag (for example: `0.1.3` with tag `v0.1.3`).
+2. Commit and push to `main`.
+3. Create and push a version tag:
+
+```bash
+git tag v0.1.3
+git push origin v0.1.3
+```
+
+The `Release` workflow builds and uploads these assets to the GitHub Release:
+- `Overmind-<version>.AppImage`
+- `overmind-desktop_<version>_amd64.deb`
+
+Install examples:
+
+```bash
+chmod +x Overmind-<version>.AppImage
+./Overmind-<version>.AppImage
+```
+
+```bash
+sudo apt install ./overmind-desktop_<version>_amd64.deb
+```
  
 Environment variables:
 
