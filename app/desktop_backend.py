@@ -4,6 +4,8 @@ import argparse
 
 import uvicorn
 
+from app.main import app as fastapi_app
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Overmind packaged backend")
@@ -11,7 +13,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
-    uvicorn.run("app.main:app", host=args.host, port=args.port, log_level="info")
+    uvicorn.run(fastapi_app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
