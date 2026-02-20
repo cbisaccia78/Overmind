@@ -11,8 +11,8 @@
     "dev": "electron .",
     "start": "electron .",
     "build:backend": "./.venv/bin/python tools/build_backend.py",
-    "pack": "npm run build:backend && electron-builder --dir",
-    "dist": "npm run build:backend && electron-builder --linux AppImage deb"
+    "pack": "npm run build:backend && electron-builder --dir --publish never",
+    "dist": "npm run build:backend && electron-builder --linux AppImage deb --publish never"
   },
   "devDependencies": {
     "electron": "^32.3.3",
