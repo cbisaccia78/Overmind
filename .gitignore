@@ -11,3 +11,5 @@ data/
 */playright-mcp
 *.egg-info/
 .coverage
+node_modules/
+dist/

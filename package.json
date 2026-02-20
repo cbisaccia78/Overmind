@@ -1,0 +1,39 @@
+{
+  "name": "overmind-desktop",
+  "version": "0.1.0",
+  "description": "Overmind desktop app",
+  "author": {
+    "name": "Cole Bisaccia",
+    "email": "cbisaccia78@gmail.com"
+  },
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --linux AppImage deb"
+  },
+  "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.overmind.desktop",
+    "productName": "Overmind",
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "app/**/*",
+      "pyproject.toml",
+      "README.md"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "maintainer": "Cole Bisaccia <cbisaccia78@gmail.com>",
+      "category": "Development"
+    }
+  }
+}

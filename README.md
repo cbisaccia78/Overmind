@@ -10,12 +10,13 @@ Repo contains a runnable single-process app with:
 - Docker Sandbox Runner (real container execution)
 - Memory (FTS-backed retrieval + optional embeddings)
 - Structured Logs/Telemetry (events + replay timeline + tool/model call audit)
-- Minimal Web Dashboard (agents, runs, run detail)
+- Desktop Dashboard via Electron (agents, runs, run detail)
 
 ## Architecture
 
-Single-process Python FastAPI app with:
-- HTTP API + dashboard pages
+Electron desktop shell + single-process Python FastAPI backend:
+- Native desktop window for dashboard pages
+- Local HTTP API consumed by the desktop app
 - In-process worker threads for orchestrator run execution
 - SQLite for local persistence
 - Docker CLI sandbox runner
@@ -46,8 +47,37 @@ SQLite tables implemented in [app/db.py](app/db.py):
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
+npm install
 make dev
 ```
+
+`make dev` launches the Electron desktop app and starts the Python backend automatically.
+
+If you only want the API server during development:
+
+```bash
+make api-dev
+```
+
+## Packaging (Linux)
+
+Build desktop distributables:
+
+```bash
+make package
+```
+
+This produces Linux artifacts in `dist/`:
+- AppImage (`*.AppImage`)
+- Debian package (`*.deb`)
+
+To produce an unpacked build directory only:
+
+```bash
+make package-unpacked
+```
+
+Packaging note: the Electron app launches the Python backend using system Python (or `.venv/bin/python` if present). Target machines still need Python 3.11+ and the Overmind Python dependencies available.
  
 Environment variables:
 
