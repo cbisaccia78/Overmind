@@ -41,6 +41,9 @@
       ],
       "maintainer": "Cole Bisaccia <cbisaccia78@gmail.com>",
       "category": "Development"
+    },
+    "deb": {
+      "afterInstall": "packaging/deb-after-install.sh"
     }
   }
 }
