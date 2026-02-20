@@ -85,7 +85,13 @@ To produce a release build and publish installers through GitHub Actions:
 
 1. Bump desktop version in `package.json` to match your next tag (for example: `0.1.3` with tag `v0.1.3`).
 2. Commit and push to `main`.
-3. Create and push a version tag:
+3. Build locally to verify packaging succeeds:
+
+```bash
+make package
+```
+
+4. Create and push a version tag:
 
 ```bash
 git tag v0.1.3
