@@ -11,6 +11,15 @@ let mainWindow;
 let backendProcess;
 let closing = false;
 
+function resolveBundledBackendPath() {
+  const binaryName = process.platform === "win32" ? "overmind-backend.exe" : "overmind-backend";
+  const bundledPath = path.join(process.resourcesPath, "backend", binaryName);
+  if (fs.existsSync(bundledPath)) {
+    return bundledPath;
+  }
+  return null;
+}
+
 function resolvePythonCommand() {
   if (process.env.OVERMIND_PYTHON) {
     return process.env.OVERMIND_PYTHON;
@@ -27,25 +36,22 @@ function resolvePythonCommand() {
 
 function startBackend() {
   const workspaceRoot = path.resolve(__dirname, "..");
-  const pythonCmd = resolvePythonCommand();
-  const args = [
-    "-m",
-    "uvicorn",
-    "app.main:app",
-    "--host",
-    HOST,
-    "--port",
-    String(PORT),
-  ];
+  const userDataDir = app.getPath("userData");
+  const defaultWorkspace = path.join(userDataDir, "workspace");
+  fs.mkdirSync(defaultWorkspace, { recursive: true });
 
-  backendProcess = spawn(pythonCmd, args, {
+  const bundledBackendPath = app.isPackaged ? resolveBundledBackendPath() : null;
+  const command = bundledBackendPath || resolvePythonCommand();
+  const args = bundledBackendPath
+    ? ["--host", HOST, "--port", String(PORT)]
+    : ["-m", "uvicorn", "app.main:app", "--host", HOST, "--port", String(PORT)];
+
+  backendProcess = spawn(command, args, {
     cwd: workspaceRoot,
     env: {
       ...process.env,
-      OVERMIND_WORKSPACE:
-        process.env.OVERMIND_WORKSPACE || workspaceRoot,
-      OVERMIND_DB:
-        process.env.OVERMIND_DB || path.join(workspaceRoot, "data", "overmind.db"),
+      OVERMIND_WORKSPACE: process.env.OVERMIND_WORKSPACE || defaultWorkspace,
+      OVERMIND_DB: process.env.OVERMIND_DB || path.join(userDataDir, "overmind.db"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

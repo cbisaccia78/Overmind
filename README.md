@@ -77,7 +77,7 @@ To produce an unpacked build directory only:
 make package-unpacked
 ```
 
-Packaging note: the Electron app launches the Python backend using system Python (or `.venv/bin/python` if present). Target machines still need Python 3.11+ and the Overmind Python dependencies available.
+Packaging note: release artifacts bundle the backend as a standalone executable via PyInstaller. End users do not need Python installed.
  
 Environment variables:
 

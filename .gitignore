@@ -13,3 +13,4 @@ data/
 .coverage
 node_modules/
 dist/
+build/

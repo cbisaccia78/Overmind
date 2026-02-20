@@ -13,11 +13,13 @@ api-dev:
 
 
 package:
+	.venv/bin/pip install -e .[dev]
 	npm install
 	npm run dist
 
 
 package-unpacked:
+	.venv/bin/pip install -e .[dev]
 	npm install
 	npm run pack
 

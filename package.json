@@ -10,8 +10,9 @@
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder --linux AppImage deb"
+    "build:backend": "./.venv/bin/python tools/build_backend.py",
+    "pack": "npm run build:backend && electron-builder --dir",
+    "dist": "npm run build:backend && electron-builder --linux AppImage deb"
   },
   "devDependencies": {
     "electron": "^32.3.3",
@@ -26,6 +27,12 @@
       "app/**/*",
       "pyproject.toml",
       "README.md"
+    ],
+    "extraResources": [
+      {
+        "from": "build/backend/overmind-backend",
+        "to": "backend/overmind-backend"
+      }
     ],
     "linux": {
       "target": [
