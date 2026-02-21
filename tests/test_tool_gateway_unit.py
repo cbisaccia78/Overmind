@@ -9,11 +9,11 @@ from app.tool_gateway import ToolGateway
 def _gateway(tmp_path: Path) -> ToolGateway:
     repo = MagicMock()
     memory = MagicMock()
-    docker = MagicMock()
+    shell = MagicMock()
     return ToolGateway(
         repo=repo,
         memory=memory,
-        docker_runner=docker,
+        shell_runner=shell,
         workspace_root=str(tmp_path),
         max_file_bytes=10,
     )
@@ -75,7 +75,7 @@ def test_dispatch_all_branches(tmp_path: Path):
     assert bad["error"]["code"] == "bad_args"
 
     # run_shell success path (delegation)
-    gateway.docker_runner.run_shell.return_value = {"ok": True, "exit_code": 0}
+    gateway.shell_runner.run_shell.return_value = {"ok": True, "exit_code": 0}
     shell = gateway._dispatch(
         "run_shell",
         {
@@ -86,7 +86,7 @@ def test_dispatch_all_branches(tmp_path: Path):
         },
     )
     assert shell["ok"] is True
-    gateway.docker_runner.run_shell.assert_called_once()
+    gateway.shell_runner.run_shell.assert_called_once()
 
     # read_file not found
     missing = gateway._dispatch("read_file", {"path": "missing.txt"})

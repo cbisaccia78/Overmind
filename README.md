@@ -7,7 +7,7 @@ Repo contains a runnable single-process app with:
 - Agent Registry (CRUD + version increments)
 - Deterministic Orchestrator (step loop, retries, step limit)
 - Tool Gateway (allowlist + strict arg validation + audit log)
-- Docker Sandbox Runner (real container execution)
+- Host Shell Runner (direct host OS execution)
 - Memory (FTS-backed retrieval + optional embeddings)
 - Structured Logs/Telemetry (events + replay timeline + tool/model call audit)
 - Desktop Dashboard via Electron (agents, runs, run detail)
@@ -19,7 +19,7 @@ Electron desktop shell + single-process Python FastAPI backend:
 - Local HTTP API consumed by the desktop app
 - In-process worker threads for orchestrator run execution
 - SQLite for local persistence
-- Docker CLI sandbox runner
+- Host shell runner
 
 Key files:
 - [app/main.py](app/main.py)
@@ -27,7 +27,7 @@ Key files:
 - [app/repository.py](app/repository.py)
 - [app/orchestrator.py](app/orchestrator.py)
 - [app/tool_gateway.py](app/tool_gateway.py)
-- [app/docker_runner.py](app/docker_runner.py)
+- [app/shell_runner.py](app/shell_runner.py)
 - [app/memory.py](app/memory.py)
 
 ## Data Model
@@ -128,13 +128,7 @@ Tests:
 make test
 ```
 
-Docker integration test (opt-in):
-
-```bash
-make test-docker
-```
-
-Full test run (normal + Docker):
+Full test run:
 
 ```bash
 make test-full
@@ -166,13 +160,10 @@ Memory:
 Tool Gateway:
 - `POST /api/runs/{id}/tools/call`
 
-## Docker Sandbox Notes
+## Host Shell Notes
 
-`run_shell` executes in Docker (`alpine:3.20`) with:
-- `--network none`
-- `--cpus 0.5`
-- `--memory 256m`
-- `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`
-- `--pids-limit 128`, `--tmpfs /tmp:rw,size=64m`
-- read-only workspace mount by default; optional per-run writable mount at `/workspace_writable`
+`run_shell` executes directly on the host OS with:
+- working directory set to the workspace root by default
+- optional writable subdirectory selection when `allow_write=true`
+- workspace path validation for writable subdirectories
 - subprocess-level timeout enforcement

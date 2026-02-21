@@ -25,12 +25,12 @@ from fastapi.templating import Jinja2Templates
 
 from .db import init_db, resolve_db_path
 from .deterministic_policy import DeterministicPolicy
-from .docker_runner import DockerRunner
 from .memory import LocalVectorMemory
 from .model_gateway import ModelGateway
 from .orchestrator import Orchestrator
 from .policy import Policy
 from .repository import Repository
+from .shell_runner import ShellRunner
 from .schemas import (
     AgentCreate,
     AgentUpdate,
@@ -61,7 +61,7 @@ class AppState:
     Attributes:
         repo: SQLite-backed persistence layer.
         memory: Local memory subsystem (FTS-backed retrieval + optional embeddings).
-        docker_runner: Docker sandbox runner.
+        shell_runner: Host shell runner.
         model_gateway: Model inference facade that records audit telemetry.
         gateway: Tool execution gateway.
         orchestrator: Background run orchestrator.
@@ -76,7 +76,7 @@ class AppState:
         """Initialize application services.
 
         Creates/initializes the database, then wires together the repository,
-        memory, Docker runner, tool gateway, and orchestrator.
+        memory, shell runner, tool gateway, and orchestrator.
 
         Args:
             db_path: Optional path to the SQLite database file.
@@ -88,11 +88,11 @@ class AppState:
 
         self.repo = Repository(db_path)
         self.memory = LocalVectorMemory(self.repo)
-        self.docker_runner = DockerRunner(workspace_root=workspace)
+        self.shell_runner = ShellRunner(workspace_root=workspace)
         self.gateway = ToolGateway(
             repo=self.repo,
             memory=self.memory,
-            docker_runner=self.docker_runner,
+            shell_runner=self.shell_runner,
             workspace_root=workspace,
         )
         self.model_gateway = ModelGateway(
@@ -532,7 +532,7 @@ def home(request: Request) -> HTMLResponse:
         {
             "agents_count": len(repo.list_agents()),
             "runs_count": len(repo.list_runs()),
-            "docker_available": _services().docker_runner.is_available(),
+            "shell_available": _services().shell_runner.is_available(),
         },
     )
 

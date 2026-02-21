@@ -1,4 +1,4 @@
-.PHONY: dev api-dev package package-unpacked test test-cov test-docker test-full
+.PHONY: dev api-dev package package-unpacked test test-cov test-full
 
 DEV_DB ?= data/overmind.db
 
@@ -30,9 +30,4 @@ test:
 test-cov:
 	pytest --cov=app --cov-report=term-missing
 
-
-test-full: test test-docker
-
-
-test-docker:
-	OVERMIND_RUN_DOCKER_TESTS=1 pytest -k docker
+test-full: test

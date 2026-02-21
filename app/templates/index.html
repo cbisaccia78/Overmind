@@ -4,7 +4,7 @@
   <div>
     <p class="eyebrow">Overmind Command Center</p>
     <h2>Build, run, and observe autonomous workflows with control.</h2>
-    <p class="muted">The app provides a deterministic orchestrator, auditable tool gateway, Docker sandbox execution, and replayable run timelines.</p>
+    <p class="muted">The app provides a deterministic orchestrator, auditable tool gateway, host shell execution, and replayable run timelines.</p>
   </div>
   <div class="hero-actions">
     <a class="button primary" href="/agents">Manage Agents</a>
@@ -22,9 +22,9 @@
     <p class="stat-value">{{ runs_count }}</p>
   </article>
   <article class="card stat">
-    <p class="stat-label">Docker Sandbox</p>
-    <p class="stat-value {% if docker_available %}good{% else %}bad{% endif %}">
-      {% if docker_available %}Online{% else %}Unavailable{% endif %}
+    <p class="stat-label">Host Shell</p>
+    <p class="stat-value {% if shell_available %}good{% else %}bad{% endif %}">
+      {% if shell_available %}Available{% else %}Unavailable{% endif %}
     </p>
   </article>
 </section>

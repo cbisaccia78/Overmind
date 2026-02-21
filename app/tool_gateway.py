@@ -1,7 +1,7 @@
 """Tool execution gateway.
 
 Enforces an agent allowlist, validates tool arguments against per-tool schemas,
-dispatches supported tools (files, memory, Docker shell), and records tool call
+dispatches supported tools (files, memory, host shell), and records tool call
 audit events.
 """
 
@@ -12,9 +12,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .docker_runner import DockerRunner
 from .memory import LocalVectorMemory
 from .repository import Repository
+from .shell_runner import ShellRunner
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class ToolGateway:
     """Authorize and dispatch tool calls, then persist audit records."""
 
     _TOOL_DESCRIPTIONS: dict[str, str] = {
-        "run_shell": "Run a shell command in a constrained Docker sandbox.",
+        "run_shell": "Run a shell command on the host OS within the workspace.",
         "read_file": "Read a UTF-8 text file from the workspace.",
         "write_file": "Write UTF-8 text content to a file in the workspace.",
         "store_memory": "Store a memory item in a named collection.",
@@ -41,7 +41,7 @@ class ToolGateway:
         self,
         repo: Repository,
         memory: LocalVectorMemory,
-        docker_runner: DockerRunner,
+        shell_runner: ShellRunner,
         workspace_root: str,
         max_file_bytes: int = 100_000,
     ):
@@ -50,13 +50,13 @@ class ToolGateway:
         Args:
             repo: Repository used to persist tool call audit records and events.
             memory: Memory subsystem used by memory tools.
-            docker_runner: Docker sandbox used by `run_shell`.
+            shell_runner: Host shell runner used by `run_shell`.
             workspace_root: Root directory used to constrain file access.
             max_file_bytes: Maximum bytes for read/write operations.
         """
         self.repo = repo
         self.memory = memory
-        self.docker_runner = docker_runner
+        self.shell_runner = shell_runner
         self.workspace_root = Path(workspace_root).resolve()
         self.max_file_bytes = max_file_bytes
         self._tool_registry: dict[str, ToolSpec] = self._build_registry()
@@ -446,7 +446,7 @@ class ToolGateway:
         return normalized
 
     def _handle_run_shell(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self.docker_runner.run_shell(
+        return self.shell_runner.run_shell(
             command=args["command"],
             timeout_s=args["timeout_s"],
             allow_write=args["allow_write"],
