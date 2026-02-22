@@ -251,7 +251,8 @@ def call_tool(
             },
         }
 
-    is_error = bool(result.get("isError"))
+    is_error = _is_mcp_error_result(result)
+    error_message = _extract_mcp_error_message(result)
     return {
         "ok": not is_error,
         "mcp": {
@@ -263,13 +264,65 @@ def call_tool(
             {
                 "error": {
                     "code": "mcp_tool_error",
-                    "message": f"MCP tool '{remote_name}' returned isError",
+                    "message": error_message
+                    or f"MCP tool '{remote_name}' returned an error",
                 }
             }
             if is_error
             else {}
         ),
     }
+
+
+def _is_mcp_error_result(result: dict[str, Any]) -> bool:
+    """Determine whether an MCP tool result represents an error."""
+    if bool(result.get("isError")) or bool(result.get("is_error")):
+        return True
+    for text in _extract_mcp_content_texts(result):
+        lowered = _strip_ansi(text).lower()
+        if "### error" in lowered:
+            return True
+        if "is_error=true" in lowered:
+            return True
+    return False
+
+
+def _extract_mcp_error_message(result: dict[str, Any]) -> str:
+    """Extract a user-facing error message from MCP tool result content."""
+    for text in _extract_mcp_content_texts(result):
+        cleaned = _strip_ansi(text).strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if "### error" in lowered or "is_error=true" in lowered:
+            return cleaned
+        if lowered.startswith("error:"):
+            return cleaned
+    return ""
+
+
+def _extract_mcp_content_texts(result: dict[str, Any]) -> list[str]:
+    """Return normalized text fragments from MCP result content."""
+    payload = result.get("content")
+    if not isinstance(payload, list):
+        return []
+    texts: list[str] = []
+    for item in payload:
+        if isinstance(item, str):
+            texts.append(item)
+            continue
+        if isinstance(item, dict):
+            text = item.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+            continue
+        texts.append(str(item))
+    return texts
+
+
+def _strip_ansi(value: str) -> str:
+    """Remove ANSI escape sequences from a text string."""
+    return "".join(ch for ch in value if ch == "\n" or ch == "\t" or ord(ch) >= 32)
 
 
 def close_sessions(session_key: str) -> int:

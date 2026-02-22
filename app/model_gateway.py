@@ -66,8 +66,9 @@ class ModelGateway:
         # may still be missing it.
         model = str(agent.get("model") or "stub-v1")
         allowed_tools = [str(name) for name in (agent.get("tools_allowed") or [])]
-        if "final_answer" not in allowed_tools:
-            allowed_tools.append("final_answer")
+        for internal_tool in ("ask_user", "final_answer"):
+            if internal_tool not in allowed_tools:
+                allowed_tools.append(internal_tool)
         request_json = {
             "task": task,
             "agent_id": agent.get("id"),

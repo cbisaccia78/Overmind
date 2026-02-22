@@ -40,6 +40,29 @@ def test_update_disable_and_create_run_missing_agent(client):
     assert create_missing.status_code == 404
 
 
+def test_create_run_accepts_unlimited_step_limit_zero(client):
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "zero-limit-agent",
+            "role": "ops",
+            "model": "stub-v1",
+            "tools_allowed": ["store_memory"],
+        },
+    ).json()
+
+    created = client.post(
+        "/api/runs",
+        json={
+            "agent_id": agent["id"],
+            "task": "remember:notes:allow-zero-limit",
+            "step_limit": 0,
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["step_limit"] == 0
+
+
 def test_run_collection_endpoints_and_cancel_flow(client):
     agent = client.post(
         "/api/agents",

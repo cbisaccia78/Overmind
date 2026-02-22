@@ -40,7 +40,7 @@ class ToolSpec:
 class ToolGateway:
     """Authorize and dispatch tool calls, then persist audit records."""
 
-    _INTERNAL_TOOL_NAMES = frozenset({"final_answer"})
+    _INTERNAL_TOOL_NAMES = frozenset({"final_answer", "ask_user"})
 
     _TOOL_DESCRIPTIONS: dict[str, str] = {
         "run_shell": "Run a shell command on the host OS within the workspace.",
@@ -48,6 +48,7 @@ class ToolGateway:
         "write_file": "Write UTF-8 text content to a file in the workspace.",
         "store_memory": "Store a memory item in a named collection.",
         "search_memory": "Search memory items in a named collection.",
+        "ask_user": "Pause execution and request additional user input (no side effects).",
         "final_answer": "Finish the run by returning a final answer message (no side effects).",
     }
     _MCP_SETTINGS_KEY = "mcp_local_servers"
@@ -156,6 +157,13 @@ class ToolGateway:
                     },
                 },
                 handler=self._handle_search_memory,
+            ),
+            "ask_user": ToolSpec(
+                name="ask_user",
+                args_schema={
+                    "message": {"type": str, "required": True, "min_length": 1},
+                },
+                handler=self._handle_ask_user,
             ),
             "final_answer": ToolSpec(
                 name="final_answer",
@@ -694,6 +702,10 @@ class ToolGateway:
             top_k=args["top_k"],
         )
         return {"ok": True, "results": results}
+
+    @staticmethod
+    def _handle_ask_user(args: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True, "message": str(args["message"])}
 
     @staticmethod
     def _handle_final_answer(args: dict[str, Any]) -> dict[str, Any]:

@@ -86,16 +86,20 @@ def test_orchestrator_step_limit_and_mid_run_cancel():
             "status": "queued",
             "agent_id": "a1",
             "task": "t",
-            "step_limit": 0,
-        }
+            "step_limit": 1,
+        },
+        {"id": "r1", "status": "running"},
     ]
     repo_limit.get_agent.return_value = {"id": "a1", "status": "active"}
     policy = MagicMock()
-    policy.plan.return_value = [PlannedAction("tool", "store_memory", {"text": "x"})]
+    policy.plan.return_value = [
+        PlannedAction("tool", "store_memory", {"text": "x"}),
+        PlannedAction("tool", "store_memory", {"text": "y"}),
+    ]
     orch_limit = _orchestrator_with(repo_limit, MagicMock(), policy)
     orch_limit.process_run("r1")
     repo_limit.create_event.assert_any_call(
-        "r1", "run.step_limit_reached", {"step_limit": 0}
+        "r1", "run.step_limit_reached", {"step_limit": 1}
     )
     repo_limit.update_run_status.assert_any_call("r1", "failed")
 
@@ -483,4 +487,217 @@ def test_orchestrator_backup_repetition_guard_pauses_run():
             "step_id": "s-ask",
             "prompt": "I am repeating the same successful action without making measurable progress. Please clarify which specific Wikipedia pages to visit next.",
         },
+    )
+
+
+def test_orchestrator_repetition_guard_resets_after_ask_user_boundary():
+    class _ResumePolicy:
+        def __init__(self):
+            self.calls = 0
+
+        def next_action(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "kind": "tool_call",
+                    "tool_name": "mcp.playwright.browser_navigate",
+                    "args": {"url": "https://en.wikipedia.org/wiki/Main_Page"},
+                }
+            return {"kind": "final_answer", "message": "done"}
+
+    repeated_url = "https://en.wikipedia.org/wiki/Main_Page"
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r8",
+            "status": "running",
+            "agent_id": "a8",
+            "task": "continue research after user input",
+            "step_limit": 20,
+        },
+        {"id": "r8", "status": "running"},
+        {"id": "r8", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a8",
+        "status": "active",
+        "tools_allowed": ["mcp.playwright.browser_navigate"],
+    }
+    repo.list_steps.return_value = [
+        {
+            "type": "tool",
+            "input_json": {
+                "tool_name": "mcp.playwright.browser_navigate",
+                "args": {"url": repeated_url},
+            },
+            "output_json": {"ok": True},
+            "error": None,
+        }
+        for _ in range(6)
+    ] + [
+        {
+            "type": "ask_user",
+            "input_json": {"prompt": "Clarify what should happen next."},
+            "output_json": {"ok": True, "status": "awaiting_input"},
+            "error": None,
+        }
+    ]
+    repo.create_step.side_effect = [
+        {"id": "s8-tool"},
+        {"id": "s8-final"},
+    ]
+
+    gateway = MagicMock()
+    gateway.call.return_value = {"ok": True, "url": repeated_url}
+
+    orch = _orchestrator_with(repo, gateway, _ResumePolicy())
+    orch.process_run("r8")
+
+    assert not any(
+        event.args[1] == "run.awaiting_input"
+        for event in repo.create_event.call_args_list
+    )
+    repo.update_run_status.assert_any_call("r8", "succeeded")
+
+
+def test_orchestrator_builds_web_interaction_contract():
+    contract = Orchestrator._build_planning_contract(
+        "interact with content on x.com and generate user feedback"
+    )
+    assert contract["mode"] == "web_interaction_feedback"
+    assert contract["min_exploration_steps"] == 1
+    assert contract["min_interaction_steps"] == 1
+    assert contract["min_feedback_signals"] == 1
+
+
+def test_orchestrator_progress_state_satisfies_web_interaction_contract():
+    orch = _orchestrator_with(MagicMock(), MagicMock(), MagicMock())
+    contract = {
+        "mode": "web_interaction_feedback",
+        "min_exploration_steps": 1,
+        "min_interaction_steps": 1,
+        "min_feedback_signals": 1,
+    }
+    progress = orch._build_progress_state(
+        history=[
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_snapshot",
+                    "args": {},
+                },
+                "output": {"ok": True},
+            },
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_click",
+                    "args": {"ref": "node-1"},
+                },
+                "output": {"ok": True},
+            },
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_wait_for",
+                    "args": {"text": "liked"},
+                },
+                "output": {"ok": True},
+            },
+        ],
+        planning_contract=contract,
+    )
+
+    assert progress["exploration_count"] >= 1
+    assert progress["interaction_count"] >= 1
+    assert progress["feedback_signal_count"] >= 1
+    assert progress["contract_satisfied"] is True
+
+
+def test_orchestrator_emits_contract_mapped_event():
+    class _DonePolicy:
+        def next_action(self, *_args, **_kwargs):
+            return {"kind": "final_answer", "message": "done"}
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r9",
+            "status": "queued",
+            "agent_id": "a9",
+            "task": "interact with content in a way that generates user feedback",
+            "step_limit": 4,
+        },
+        {"id": "r9", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a9",
+        "status": "active",
+        "tools_allowed": ["mcp.playwright.browser_snapshot"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [{"id": "s-plan"}, {"id": "s-final"}]
+
+    orch = _orchestrator_with(repo, MagicMock(), _DonePolicy())
+    orch.process_run("r9")
+
+    assert any(
+        call.args[1] == "run.contract_mapped"
+        and call.args[2].get("planning_contract", {}).get("mode")
+        == "web_interaction_feedback"
+        for call in repo.create_event.call_args_list
+    )
+
+
+def test_orchestrator_emits_plan_action_selected_event():
+    class _OneToolPolicy:
+        def __init__(self):
+            self.calls = 0
+
+        def next_action(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "kind": "tool_call",
+                    "tool_name": "mcp.playwright.browser_snapshot",
+                    "args": {},
+                }
+            return {"kind": "final_answer", "message": "done"}
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r10",
+            "status": "queued",
+            "agent_id": "a10",
+            "task": "interact with content in a way that generates user feedback",
+            "step_limit": 6,
+        },
+        {"id": "r10", "status": "running"},
+        {"id": "r10", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a10",
+        "status": "active",
+        "tools_allowed": ["mcp.playwright.browser_snapshot"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [
+        {"id": "s-plan"},
+        {"id": "s-tool"},
+        {"id": "s-final"},
+    ]
+
+    gateway = MagicMock()
+    gateway.call.return_value = {"ok": True, "snapshot": "ok"}
+
+    orch = _orchestrator_with(repo, gateway, _OneToolPolicy())
+    orch.process_run("r10")
+
+    assert any(
+        call.args[1] == "plan.action_selected"
+        and call.args[2].get("action", {}).get("kind") == "tool_call"
+        and call.args[2].get("action", {}).get("tool_name")
+        == "mcp.playwright.browser_snapshot"
+        for call in repo.create_event.call_args_list
     )

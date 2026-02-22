@@ -13,6 +13,25 @@
   </div>
 </section>
 
+{% if run_input_error %}
+<section class="card">
+  <p class="pill pill-bad">{{ run_input_error }}</p>
+</section>
+{% endif %}
+
+{% if run.status == 'awaiting_input' %}
+<section class="card">
+  <h3>Agent Needs Input</h3>
+  <p class="muted">{{ awaiting_prompt }}</p>
+  <form method="post" action="/runs/{{ run.id }}/input" class="form-grid">
+    <label>Your reply
+      <input name="message" value="{{ run_input_value }}" placeholder="Type your response to continue this run" />
+    </label>
+    <button type="submit" class="button primary">Continue Run</button>
+  </form>
+</section>
+{% endif %}
+
 <section class="card">
   <h3>Steps</h3>
   <ul class="timeline">

@@ -57,12 +57,12 @@ class RunCreate(BaseModel):
     Attributes:
         agent_id: Agent ID that will execute the run.
         task: Task string.
-        step_limit: Maximum steps allowed for this run.
+        step_limit: Maximum steps allowed for this run, or 0 for no limit.
     """
 
     agent_id: str
     task: str
-    step_limit: int = Field(default=8, ge=1, le=100)
+    step_limit: int = Field(default=8, ge=0)
 
 
 class MemoryStoreRequest(BaseModel):

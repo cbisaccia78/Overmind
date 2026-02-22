@@ -136,6 +136,12 @@ def test_dispatch_all_branches(tmp_path: Path):
     )
     assert search_ok == {"ok": True, "results": [{"id": "m1", "score": 0.9}]}
 
+    ask = gateway._dispatch("ask_user", {"message": "Need your input"})
+    assert ask == {"ok": True, "message": "Need your input"}
+
+    done = gateway._dispatch("final_answer", {"message": "complete"})
+    assert done == {"ok": True, "message": "complete"}
+
     unknown = gateway._dispatch("nope", {})
     assert unknown["ok"] is False
     assert unknown["error"]["code"] == "unknown_tool"

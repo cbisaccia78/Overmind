@@ -23,16 +23,43 @@
       </select>
     </label>
     <label>Task <input name="task" value="{{ run_form_values.task }}" /></label>
-    <label>Step limit <input name="step_limit" type="number" min="1" max="100" value="{{ run_form_values.step_limit }}" /></label>
+    <label>
+      Step limit
+      <input
+        id="step-limit-input"
+        name="step_limit"
+        type="number"
+        min="1"
+        value="{{ run_form_values.step_limit }}"
+        {% if run_form_values.step_limit_infinite %}disabled{% endif %}
+      />
+    </label>
+    <label>
+      <input id="step-limit-infinite" name="step_limit_infinite" type="checkbox" value="1" {% if run_form_values.step_limit_infinite %}checked{% endif %} />
+      Infinity (no step cap)
+    </label>
     <button type="submit" class="button primary">Start Run</button>
   </form>
+  <script>
+    (() => {
+      const limitInput = document.getElementById("step-limit-input");
+      const infiniteToggle = document.getElementById("step-limit-infinite");
+      if (!limitInput || !infiniteToggle) return;
+      const sync = () => {
+        const infinite = Boolean(infiniteToggle.checked);
+        limitInput.disabled = infinite;
+      };
+      infiniteToggle.addEventListener("change", sync);
+      sync();
+    })();
+  </script>
   {% endif %}
 </section>
 
 <section class="card">
   <h3>Recent Runs</h3>
   <table class="data-table">
-    <thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Created</th></tr></thead>
+    <thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
     <tbody>
       {% for run in runs %}
       <tr>
@@ -40,6 +67,13 @@
         <td>{{ run.task }}</td>
         <td><span class="pill {% if run.status == 'succeeded' %}pill-good{% elif run.status == 'failed' %}pill-bad{% elif run.status == 'running' %}pill-warn{% else %}pill-neutral{% endif %}">{{ run.status }}</span></td>
         <td>{{ run.created_at }}</td>
+        <td>
+          {% if run.status == 'awaiting_input' %}
+          <a class="button primary" href="/runs/{{ run.id }}">Provide Input</a>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

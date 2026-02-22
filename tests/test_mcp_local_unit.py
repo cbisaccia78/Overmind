@@ -148,6 +148,24 @@ def test_call_tool_success_error_and_session_paths(
     assert is_error["ok"] is False
     assert is_error["error"]["code"] == "mcp_tool_error"
 
+    def _run_textual_error(coro):
+        coro.close()
+        return {
+            "isError": False,
+            "content": [
+                {
+                    "type": "text",
+                    "text": "### Error\nError: browserType.launchPersistentContext failed",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(mcp_local, "_run_coro", _run_textual_error)
+    textual_error = mcp_local.call_tool(config, "echo", {"text": "x"})
+    assert textual_error["ok"] is False
+    assert textual_error["error"]["code"] == "mcp_tool_error"
+    assert "### Error" in textual_error["error"]["message"]
+
     def _run_raises(coro):
         coro.close()
         raise RuntimeError("transport down")

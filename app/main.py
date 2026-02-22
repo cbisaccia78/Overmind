@@ -230,6 +230,64 @@ async def _parse_urlencoded_form_multi(request: Request) -> dict[str, list[str]]
     return parse_qs(body, keep_blank_values=True)
 
 
+def _latest_awaiting_prompt(
+    events: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+) -> str:
+    """Return the most recent user-facing prompt for an awaiting-input run."""
+    for event in reversed(events):
+        if str(event.get("type") or "") != "run.awaiting_input":
+            continue
+        payload = dict(event.get("payload_json") or {})
+        prompt = str(payload.get("prompt") or "").strip()
+        if prompt:
+            return prompt
+
+    for step in reversed(steps):
+        if str(step.get("type") or "") != "ask_user":
+            continue
+        step_input = dict(step.get("input_json") or {})
+        prompt = str(step_input.get("prompt") or "").strip()
+        if prompt:
+            return prompt
+
+    return "The agent is waiting for your input."
+
+
+def _run_detail_context(
+    run_id: str,
+    *,
+    run_input_error: str | None = None,
+    run_input_value: str = "",
+) -> dict[str, Any] | None:
+    """Build the template context for the run detail page."""
+    repo = _services().repo
+    run = repo.get_run(run_id)
+    if not run:
+        return None
+
+    steps = repo.list_steps(run_id)
+    tool_calls = repo.list_tool_calls(run_id)
+    model_calls = repo.list_model_calls(run_id)
+    events = repo.list_events(run_id)
+    awaiting_prompt = (
+        _latest_awaiting_prompt(events, steps)
+        if run.get("status") == "awaiting_input"
+        else ""
+    )
+
+    return {
+        "run": run,
+        "steps": steps,
+        "tool_calls": tool_calls,
+        "model_calls": model_calls,
+        "events": events,
+        "awaiting_prompt": awaiting_prompt,
+        "run_input_error": run_input_error,
+        "run_input_value": run_input_value,
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     """Health check endpoint.
@@ -775,6 +833,7 @@ def runs_page(request: Request) -> HTMLResponse:
                 "agent_id": "",
                 "task": "shell:echo hello overmind",
                 "step_limit": "8",
+                "step_limit_infinite": False,
             },
         },
     )
@@ -795,10 +854,17 @@ async def create_run_form(request: Request) -> Response:
     agent_id = form.get("agent_id", "").strip()
     task = form.get("task", "").strip()
     step_limit_raw = form.get("step_limit", "8").strip() or "8"
+    step_limit_infinite = form.get("step_limit_infinite", "").strip().lower() in {
+        "1",
+        "true",
+        "on",
+        "yes",
+    }
     run_form_values = {
         "agent_id": agent_id,
         "task": task,
         "step_limit": step_limit_raw,
+        "step_limit_infinite": step_limit_infinite,
     }
 
     agents = repo.list_agents()
@@ -855,33 +921,36 @@ async def create_run_form(request: Request) -> Response:
             status_code=422,
         )
 
-    try:
-        step_limit = int(step_limit_raw)
-    except ValueError:
-        return templates.TemplateResponse(
-            request,
-            "runs.html",
-            {
-                "runs": repo.list_runs(),
-                "agents": agents,
-                "run_error": "Step limit must be an integer between 1 and 100.",
-                "run_form_values": run_form_values,
-            },
-            status_code=422,
-        )
+    if step_limit_infinite:
+        step_limit = 0
+    else:
+        try:
+            step_limit = int(step_limit_raw)
+        except ValueError:
+            return templates.TemplateResponse(
+                request,
+                "runs.html",
+                {
+                    "runs": repo.list_runs(),
+                    "agents": agents,
+                    "run_error": "Step limit must be a positive integer, or enable infinity.",
+                    "run_form_values": run_form_values,
+                },
+                status_code=422,
+            )
 
-    if step_limit < 1 or step_limit > 100:
-        return templates.TemplateResponse(
-            request,
-            "runs.html",
-            {
-                "runs": repo.list_runs(),
-                "agents": agents,
-                "run_error": "Step limit must be between 1 and 100.",
-                "run_form_values": run_form_values,
-            },
-            status_code=422,
-        )
+        if step_limit < 1:
+            return templates.TemplateResponse(
+                request,
+                "runs.html",
+                {
+                    "runs": repo.list_runs(),
+                    "agents": agents,
+                    "run_error": "Step limit must be at least 1, or enable infinity.",
+                    "run_form_values": run_form_values,
+                },
+                status_code=422,
+            )
 
     run = repo.create_run(
         agent_id=agent_id,
@@ -904,22 +973,50 @@ def run_detail_page(run_id: str, request: Request) -> HTMLResponse:
     Returns:
         HTML response.
     """
-    repo = _services().repo
-    run = repo.get_run(run_id)
-    if not run:
+    context = _run_detail_context(run_id)
+    if context is None:
+        return HTMLResponse("Run not found", status_code=404)
+    return templates.TemplateResponse(request, "run_detail.html", context)
+
+
+@app.post("/runs/{run_id}/input", response_class=HTMLResponse)
+async def provide_run_input_form(run_id: str, request: Request) -> Response:
+    """Handle run follow-up input from the run detail HTML page."""
+    form = await _parse_urlencoded_form(request)
+    message = form.get("message", "").strip()
+
+    context = _run_detail_context(
+        run_id,
+        run_input_value=message,
+    )
+    if context is None:
         return HTMLResponse("Run not found", status_code=404)
 
-    return templates.TemplateResponse(
-        request,
-        "run_detail.html",
-        {
-            "run": run,
-            "steps": repo.list_steps(run_id),
-            "tool_calls": repo.list_tool_calls(run_id),
-            "model_calls": repo.list_model_calls(run_id),
-            "events": repo.list_events(run_id),
-        },
-    )
+    run = context["run"]
+    if run.get("status") != "awaiting_input":
+        context["run_input_error"] = "Run is not awaiting input."
+        return templates.TemplateResponse(
+            request,
+            "run_detail.html",
+            context,
+            status_code=409,
+        )
+
+    if not message:
+        context["run_input_error"] = "Input is required."
+        return templates.TemplateResponse(
+            request,
+            "run_detail.html",
+            context,
+            status_code=422,
+        )
+
+    repo = _services().repo
+    repo.append_run_task(run_id, message)
+    repo.create_event(run_id, "run.input_received", {"run_id": run_id})
+    repo.update_run_status(run_id, "running")
+    _services().orchestrator.launch(run_id)
+    return RedirectResponse(url=f"/runs/{run_id}", status_code=303)
 
 
 @app.get("/settings", response_class=HTMLResponse)
