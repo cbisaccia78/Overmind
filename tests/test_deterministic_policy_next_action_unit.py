@@ -374,7 +374,7 @@ def test_next_action_generic_repeated_success_loop_asks_user(monkeypatch):
     ]
 
     action = policy.next_action(
-        "navigate and then wait for me",
+        "navigate around x.com and keep exploring",
         agent={"tools_allowed": ["mcp.playwright.browser_navigate"]},
         context={"run_id": "r1", "planning_contract": {"mode": "generic"}},
         history=repeated_history,
@@ -433,7 +433,7 @@ def test_next_action_repeated_success_loop_resets_after_ask_user_boundary(monkey
     )
 
     action = policy.next_action(
-        "navigate and then wait for me",
+        "navigate around x.com and keep exploring",
         agent={
             "tools_allowed": [
                 "mcp.playwright.browser_navigate",
@@ -453,6 +453,103 @@ def test_next_action_repeated_success_loop_resets_after_ask_user_boundary(monkey
             "metadata": {"source": "analysis"},
         },
     }
+
+
+def test_next_action_wait_for_user_pauses_after_successful_navigation(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_snapshot",
+                "args": {},
+            }
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "navigate to x.com and then wait for me to tell you next steps",
+        agent={"tools_allowed": ["mcp.playwright.browser_navigate"]},
+        context={"run_id": "r1", "planning_contract": {"mode": "generic"}},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_navigate",
+                    "args": {"url": "https://x.com"},
+                },
+                "output": {"ok": True},
+            }
+        ],
+    )
+
+    assert action == {
+        "kind": "ask_user",
+        "message": "Reached the requested page. Waiting for your next instruction.",
+    }
+    assert gateway.calls == []
+
+
+def test_next_action_uses_latest_user_input_for_wait_detection(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_snapshot",
+                "args": {},
+            }
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        (
+            "navigate to x.com and then wait for me to tell you next steps.\n\n"
+            "User input: start interacting with content in a way that generates "
+            "user feedback"
+        ),
+        agent={
+            "tools_allowed": [
+                "mcp.playwright.browser_navigate",
+                "mcp.playwright.browser_snapshot",
+            ]
+        },
+        context={
+            "run_id": "r1",
+            "planning_contract": {
+                "mode": "web_interaction_feedback",
+                "min_exploration_steps": 1,
+                "min_interaction_steps": 1,
+                "min_feedback_signals": 1,
+            },
+            "progress_state": {
+                "exploration_count": 0,
+                "interaction_count": 0,
+                "feedback_signal_count": 0,
+                "consecutive_same_success": 1,
+                "contract_satisfied": False,
+            },
+        },
+        history=[
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_navigate",
+                    "args": {"url": "https://x.com"},
+                },
+                "output": {"ok": True},
+            }
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_snapshot",
+        "args": {},
+    }
+    assert len(gateway.calls) == 1
 
 
 def test_next_action_emits_verify_for_screenshot_artifacts(monkeypatch):
@@ -509,6 +606,21 @@ def test_policy_helpers_extract_url_and_truncate_summary():
     assert "exit_code=0" in summary
     assert summary.endswith("...")
     assert len(summary) < 900
+
+    mcp_summary = DeterministicPolicy._summarize_tool_output(
+        {
+            "mcp": {
+                "result": {
+                    "content": [
+                        {"type": "text", "text": "### Page snapshot"},
+                        {"type": "text", "text": '- button "Like" [ref=e22]'},
+                    ]
+                }
+            }
+        }
+    )
+    assert "Page snapshot" in mcp_summary
+    assert "[ref=e22]" in mcp_summary
 
 
 def test_next_action_uses_contract_prompt_for_wikipedia_research(monkeypatch):
@@ -688,3 +800,112 @@ def test_next_action_uses_strategy_prompt_for_web_interaction_contract(monkeypat
         "args": {},
     }
     assert "Follow phased execution" in gateway.calls[0]["task"]
+
+
+def test_next_action_contract_inference_missing_tool_call_uses_fallback_tool(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": False,
+                "error": {"message": "openai response missing valid tool call"},
+            }
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "interact with content on x.com in a way that generates user feedback",
+        agent={"tools_allowed": ["mcp.playwright.browser_snapshot"]},
+        context={
+            "run_id": "r1",
+            "planning_contract": {
+                "mode": "web_interaction_feedback",
+                "min_exploration_steps": 1,
+                "min_interaction_steps": 1,
+                "min_feedback_signals": 1,
+            },
+            "progress_state": {
+                "exploration_count": 0,
+                "interaction_count": 0,
+                "feedback_signal_count": 0,
+                "consecutive_same_success": 0,
+                "contract_satisfied": False,
+            },
+        },
+        history=[
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_navigate",
+                    "args": {"url": "https://x.com"},
+                },
+                "output": {"ok": True},
+            }
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_snapshot",
+        "args": {},
+    }
+
+
+def test_next_action_contract_fallback_click_uses_snapshot_ref(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": False,
+                "error": {"message": "openai response missing valid tool call"},
+            }
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "interact with content on x.com in a way that generates user feedback",
+        agent={"tools_allowed": ["mcp.playwright.browser_click"]},
+        context={
+            "run_id": "r1",
+            "planning_contract": {
+                "mode": "web_interaction_feedback",
+                "min_exploration_steps": 1,
+                "min_interaction_steps": 1,
+                "min_feedback_signals": 1,
+            },
+            "progress_state": {
+                "exploration_count": 1,
+                "interaction_count": 0,
+                "feedback_signal_count": 0,
+                "consecutive_same_success": 0,
+                "contract_satisfied": False,
+            },
+        },
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {
+                    "ok": True,
+                    "mcp": {
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": '- button "Like" [ref=e197]',
+                                }
+                            ]
+                        }
+                    },
+                },
+            }
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_click",
+        "args": {"ref": "e197"},
+    }

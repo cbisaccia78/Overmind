@@ -183,6 +183,58 @@ class ModelGateway:
             "https://api.openai.com/v1/chat/completions",
         )
         timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        data = self._request_openai_chat_completion(
+            payload=payload,
+            api_key=api_key,
+            endpoint=endpoint,
+            timeout_s=timeout_s,
+        )
+        try:
+            tool_name, args = self._parse_openai_tool_call(
+                data=data,
+                allowed_tools=allowed_tools,
+                alias_map=alias_map,
+            )
+        except RuntimeError as exc:
+            if "openai response missing valid tool call" not in str(exc).lower():
+                raise
+            retry_payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Select exactly one function call and return no plain text."
+                        ),
+                    },
+                    {"role": "user", "content": task},
+                ],
+                "tools": tools,
+                "tool_choice": "required",
+                "temperature": 0,
+            }
+            retry_data = self._request_openai_chat_completion(
+                payload=retry_payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+            tool_name, args = self._parse_openai_tool_call(
+                data=retry_data,
+                allowed_tools=allowed_tools,
+                alias_map=alias_map,
+            )
+
+        return {"tool_name": tool_name, "args": args}
+
+    @staticmethod
+    def _request_openai_chat_completion(
+        *,
+        payload: dict[str, Any],
+        api_key: str,
+        endpoint: str,
+        timeout_s: int,
+    ) -> dict[str, Any]:
         req = urlrequest.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
@@ -194,10 +246,17 @@ class ModelGateway:
         )
         try:
             with urlrequest.urlopen(req, timeout=timeout_s) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
         except (urlerror.URLError, TimeoutError) as exc:
             raise RuntimeError(f"openai request failed: {exc}") from exc
 
+    @staticmethod
+    def _parse_openai_tool_call(
+        *,
+        data: dict[str, Any],
+        allowed_tools: list[str],
+        alias_map: dict[str, str],
+    ) -> tuple[str, dict[str, Any]]:
         try:
             message = data["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
@@ -213,7 +272,7 @@ class ModelGateway:
             raise RuntimeError(f"openai selected disallowed tool '{tool_name}'")
         if not isinstance(args, dict):
             raise RuntimeError("openai tool call arguments must be an object")
-        return {"tool_name": tool_name, "args": args}
+        return tool_name, args
 
     def _get_openai_tools(
         self, allowed_tools: list[str]

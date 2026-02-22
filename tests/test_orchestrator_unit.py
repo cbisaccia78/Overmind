@@ -44,6 +44,69 @@ def test_orchestrator_early_exit_when_already_canceled():
     repo.create_event.assert_not_called()
 
 
+def test_orchestrator_keeps_resources_for_awaiting_input_runs():
+    class _AskPolicy:
+        def next_action(self, *_args, **_kwargs):
+            return {"kind": "ask_user", "message": "Need your next instruction."}
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r-await",
+            "status": "queued",
+            "agent_id": "a-await",
+            "task": "navigate and wait",
+            "step_limit": 5,
+        },
+        {"id": "r-await", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a-await",
+        "status": "active",
+        "tools_allowed": ["mcp.playwright.browser_navigate"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [{"id": "s-plan"}, {"id": "s-ask"}]
+
+    gateway = MagicMock()
+    orch = _orchestrator_with(repo, gateway, _AskPolicy())
+    orch.process_run("r-await")
+
+    repo.update_run_status.assert_any_call("r-await", "awaiting_input")
+    gateway.release_run_resources.assert_not_called()
+
+
+def test_orchestrator_releases_resources_for_terminal_runs():
+    class _DonePolicy:
+        def next_action(self, *_args, **_kwargs):
+            return {"kind": "final_answer", "message": "done"}
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r-done",
+            "status": "queued",
+            "agent_id": "a-done",
+            "task": "finish",
+            "step_limit": 5,
+        },
+        {"id": "r-done", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a-done",
+        "status": "active",
+        "tools_allowed": [],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [{"id": "s-plan"}, {"id": "s-final"}]
+
+    gateway = MagicMock()
+    orch = _orchestrator_with(repo, gateway, _DonePolicy())
+    orch.process_run("r-done")
+
+    gateway.release_run_resources.assert_called_once_with("r-done")
+
+
 def test_orchestrator_fails_when_agent_missing_or_disabled():
     repo_missing = MagicMock()
     repo_missing.get_run.return_value = {

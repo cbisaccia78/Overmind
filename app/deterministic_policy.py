@@ -122,8 +122,18 @@ class DeterministicPolicy(Policy):
             context.get("progress_state")
             or self._derive_progress_state(history, planning_contract)
         )
+        latest_instruction = self._latest_instruction_segment(task)
+        wait_for_user_requested = self._requests_wait_for_user(latest_instruction)
 
         use_openai = bool(os.getenv("OPENAI_API_KEY") and allowed_tools)
+
+        if wait_for_user_requested and self._has_successful_browser_navigation(
+            tool_steps
+        ):
+            return {
+                "kind": "ask_user",
+                "message": "Reached the requested page. Waiting for your next instruction.",
+            }
 
         if not tool_steps:
             if "curl" in lowered and not self._extract_url(task):
@@ -165,6 +175,14 @@ class DeterministicPolicy(Policy):
                     message = inference.get("error", {}).get(
                         "message", "model inference failed"
                     )
+                    fallback = self._fallback_contract_action(
+                        planning_contract=planning_contract,
+                        progress_state=progress_state,
+                        allowed_tools=allowed_tools,
+                        history=history,
+                    )
+                    if fallback and self._is_recoverable_inference_error(message):
+                        return fallback
                     return {
                         "kind": "final_answer",
                         "message": f"I could not infer a tool action: {message}",
@@ -283,6 +301,14 @@ class DeterministicPolicy(Policy):
                     "message", "model inference failed"
                 )
                 if self._should_ask_user_on_inference_error(message):
+                    fallback = self._fallback_contract_action(
+                        planning_contract=planning_contract,
+                        progress_state=progress_state,
+                        allowed_tools=allowed_tools,
+                        history=history,
+                    )
+                    if fallback:
+                        return fallback
                     return {
                         "kind": "ask_user",
                         "message": (
@@ -407,6 +433,13 @@ class DeterministicPolicy(Policy):
         return "openai response missing valid tool call" in lowered
 
     @staticmethod
+    def _is_recoverable_inference_error(message: str) -> bool:
+        lowered = str(message or "").lower()
+        if "openai response missing valid tool call" in lowered:
+            return True
+        return "openai request failed" in lowered and "timeout" in lowered
+
+    @staticmethod
     def _action_from_inference(inference: dict[str, Any]) -> dict[str, Any]:
         tool_name = str(inference.get("tool_name") or "")
         args = dict(inference.get("args") or {})
@@ -492,9 +525,39 @@ class DeterministicPolicy(Policy):
         stderr = str(output.get("stderr") or "").strip()
         exit_code = output.get("exit_code")
         body = stdout if stdout else stderr
+        if not body:
+            body = DeterministicPolicy._extract_mcp_text(output)
+        if not body:
+            observation = output.get("observation")
+            if isinstance(observation, dict):
+                body = str(observation.get("text") or "").strip()
         if len(body) > 800:
             body = body[:800] + "..."
         return f"Tool completed with exit_code={exit_code}.\n\n{body}".strip()
+
+    @staticmethod
+    def _extract_mcp_text(output: dict[str, Any]) -> str:
+        mcp_payload = output.get("mcp")
+        if not isinstance(mcp_payload, dict):
+            return ""
+        result = mcp_payload.get("result")
+        if not isinstance(result, dict):
+            return ""
+        content = result.get("content")
+        if not isinstance(content, list):
+            return ""
+        texts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    texts.append(text)
+                continue
+            if isinstance(item, dict):
+                text = str(item.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+        return "\n".join(texts).strip()
 
     @staticmethod
     def _collect_failure_memory(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -807,3 +870,179 @@ class DeterministicPolicy(Policy):
             return False
         window = signatures[:min_repeats]
         return len(set(window)) == 1
+
+    def _fallback_contract_action(
+        self,
+        *,
+        planning_contract: dict[str, Any],
+        progress_state: dict[str, Any],
+        allowed_tools: set[str],
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        mode = str(planning_contract.get("mode") or "generic")
+        if mode != "web_interaction_feedback":
+            return None
+        return self._fallback_web_interaction_action(
+            planning_contract=planning_contract,
+            progress_state=progress_state,
+            allowed_tools=allowed_tools,
+            history=history,
+        )
+
+    def _fallback_web_interaction_action(
+        self,
+        *,
+        planning_contract: dict[str, Any],
+        progress_state: dict[str, Any],
+        allowed_tools: set[str],
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        min_exploration = int(planning_contract.get("min_exploration_steps") or 1)
+        min_interaction = int(planning_contract.get("min_interaction_steps") or 1)
+        min_feedback = int(planning_contract.get("min_feedback_signals") or 1)
+
+        exploration_count = int(progress_state.get("exploration_count") or 0)
+        interaction_count = int(progress_state.get("interaction_count") or 0)
+        feedback_count = int(progress_state.get("feedback_signal_count") or 0)
+
+        if exploration_count < min_exploration:
+            for tool_name in (
+                "mcp.playwright.browser_snapshot",
+                "mcp.playwright.browser_tabs",
+                "mcp.playwright.browser_console_messages",
+                "mcp.playwright.browser_network_requests",
+            ):
+                if tool_name in allowed_tools:
+                    return {"kind": "tool_call", "tool_name": tool_name, "args": {}}
+            return None
+
+        if interaction_count < min_interaction:
+            if "mcp.playwright.browser_click" in allowed_tools:
+                ref = self._extract_click_ref_from_history(history)
+                if ref:
+                    return {
+                        "kind": "tool_call",
+                        "tool_name": "mcp.playwright.browser_click",
+                        "args": {"ref": ref},
+                    }
+            if "mcp.playwright.browser_press_key" in allowed_tools:
+                return {
+                    "kind": "tool_call",
+                    "tool_name": "mcp.playwright.browser_press_key",
+                    "args": {"key": "j"},
+                }
+            return None
+
+        if feedback_count < min_feedback:
+            for tool_name in (
+                "mcp.playwright.browser_network_requests",
+                "mcp.playwright.browser_console_messages",
+            ):
+                if tool_name in allowed_tools:
+                    return {"kind": "tool_call", "tool_name": tool_name, "args": {}}
+            if "mcp.playwright.browser_wait_for" in allowed_tools:
+                return {
+                    "kind": "tool_call",
+                    "tool_name": "mcp.playwright.browser_wait_for",
+                    "args": {"time": 2},
+                }
+            return None
+
+        return None
+
+    def _extract_click_ref_from_history(self, history: list[dict[str, Any]]) -> str | None:
+        for item in reversed(history):
+            if item.get("step_type") != "tool":
+                continue
+            output = dict(item.get("output") or {})
+            if not output.get("ok"):
+                continue
+            text = self._extract_mcp_text(output)
+            if not text:
+                continue
+            preferred = self._extract_preferred_ref(text)
+            if preferred:
+                return preferred
+        return None
+
+    @staticmethod
+    def _extract_preferred_ref(text: str) -> str | None:
+        preferred_tokens = (
+            "button",
+            "link",
+            "reply",
+            "repost",
+            "quote",
+            "like",
+            "follow",
+            "post",
+            "tweet",
+        )
+        for line in text.splitlines():
+            lowered = line.lower()
+            if "[ref=" not in lowered:
+                continue
+            if not any(token in lowered for token in preferred_tokens):
+                continue
+            match = re.search(r"\[ref=([^\]]+)\]", line)
+            if match:
+                return match.group(1).strip()
+        fallback = re.search(r"\[ref=([^\]]+)\]", text)
+        if fallback:
+            return fallback.group(1).strip()
+        return None
+
+    @staticmethod
+    def _latest_instruction_segment(task: str) -> str:
+        """Return the latest task segment after the most recent user input marker."""
+        text = str(task or "").strip()
+        if not text:
+            return ""
+        chunks = re.split(r"\n+\s*user input:\s*", text, flags=re.IGNORECASE)
+        return (chunks[-1] if chunks else text).strip()
+
+    @staticmethod
+    def _requests_wait_for_user(instruction: str) -> bool:
+        """Detect directives that explicitly ask the agent to pause for user input."""
+        lowered = str(instruction or "").lower()
+        if not lowered:
+            return False
+        if "do not wait" in lowered or "don't wait" in lowered:
+            return False
+
+        direct_markers = [
+            "wait for me",
+            "wait for my",
+            "wait for input",
+            "wait for next step",
+            "wait for next steps",
+            "wait until i",
+            "stop and wait",
+            "pause and wait",
+            "tell you what to do next",
+            "tell you next steps",
+            "input login credentials",
+            "await my input",
+        ]
+        if any(marker in lowered for marker in direct_markers):
+            return True
+
+        return bool(
+            re.search(
+                r"\b(wait|pause|stop)\b.*\b(next step|next steps|instructions|input|credentials)\b",
+                lowered,
+            )
+        )
+
+    @staticmethod
+    def _has_successful_browser_navigation(tool_steps: list[dict[str, Any]]) -> bool:
+        """Return whether history includes a successful browser navigate tool call."""
+        for step in reversed(tool_steps):
+            output = dict(step.get("output") or {})
+            if not output.get("ok"):
+                continue
+            tool_input = dict(step.get("input") or {})
+            tool_name = str(tool_input.get("tool_name") or "")
+            if tool_name.endswith("browser_navigate"):
+                return True
+        return False

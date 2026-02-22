@@ -79,34 +79,39 @@ class Orchestrator:
         Returns:
             None.
         """
+        keep_resources = False
         try:
             if callable(getattr(type(self.policy), "next_action", None)):
-                self._process_run_iterative(run_id)
-                return
-            self._process_run_legacy(run_id)
+                keep_resources = self._process_run_iterative(run_id)
+            else:
+                keep_resources = self._process_run_legacy(run_id)
         finally:
             releaser = getattr(self.tool_gateway, "release_run_resources", None)
-            if callable(releaser):
+            if callable(releaser) and not keep_resources:
                 releaser(run_id)
 
-    def _process_run_iterative(self, run_id: str) -> None:
-        """Process a run via iterative next-action planning."""
+    def _process_run_iterative(self, run_id: str) -> bool:
+        """Process a run via iterative next-action planning.
+
+        Returns:
+            True when resources should be retained (for awaiting-input runs).
+        """
         run = self.repo.get_run(run_id)
         if not run:
-            return
+            return False
         if run["status"] == "canceled":
-            return
+            return False
 
         agent = self.repo.get_agent(run["agent_id"])
         if not agent:
             self.repo.update_run_status(run_id, "failed")
             self.repo.create_event(run_id, "run.failed", {"error": "agent_not_found"})
-            return
+            return False
 
         if agent.get("status") != "active":
             self.repo.update_run_status(run_id, "failed")
             self.repo.create_event(run_id, "run.failed", {"error": "agent_disabled"})
-            return
+            return False
 
         step_limit = int(run["step_limit"])
         planning_contract = self._build_planning_contract(str(run.get("task") or ""))
@@ -172,7 +177,7 @@ class Orchestrator:
             latest = self.repo.get_run(run_id)
             if latest and latest["status"] == "canceled":
                 self.repo.create_event(run_id, "run.canceled", {"run_id": run_id})
-                return
+                return False
 
             progress_state = self._build_progress_state(history, planning_contract)
 
@@ -254,7 +259,7 @@ class Orchestrator:
                                 "specific Wikipedia pages to visit next."
                             ),
                         )
-                        return
+                        return True
                     continue
 
                 message = result.get("error", {}).get("message", "tool failed")
@@ -301,7 +306,7 @@ class Orchestrator:
                             },
                         },
                     )
-                    return
+                    return False
                 continue
 
             if kind == "ask_user":
@@ -320,7 +325,7 @@ class Orchestrator:
                     {"run_id": run_id, "step_id": step["id"], "prompt": prompt},
                 )
                 self.repo.update_run_status(run_id, "awaiting_input")
-                return
+                return True
 
             if kind == "final_answer":
                 message = str(action.get("message") or "done")
@@ -343,7 +348,7 @@ class Orchestrator:
                     "run.succeeded",
                     {"run_id": run_id, "final_answer": message},
                 )
-                return
+                return False
 
             if kind == "verify":
                 checks = list(action.get("checks") or [])
@@ -396,7 +401,7 @@ class Orchestrator:
                         },
                     )
                     self.repo.update_run_status(run_id, "awaiting_input")
-                    return
+                    return True
 
                 self.repo.update_run_status(run_id, "failed")
                 self.repo.create_event(
@@ -404,7 +409,7 @@ class Orchestrator:
                     "run.failed",
                     {"run_id": run_id, "error": verification.get("error")},
                 )
-                return
+                return False
 
             self.repo.update_run_status(run_id, "failed")
             self.repo.create_event(
@@ -418,13 +423,14 @@ class Orchestrator:
                     },
                 },
             )
-            return
+            return False
 
         if step_limit > 0:
             self.repo.create_event(
                 run_id, "run.step_limit_reached", {"step_limit": step_limit}
             )
             self.repo.update_run_status(run_id, "failed")
+        return False
 
     def _pause_for_user(self, *, run_id: str, idx: int, prompt: str) -> None:
         """Pause a run and request user input with a persisted ask-user step."""
@@ -973,24 +979,24 @@ class Orchestrator:
             return None
         return resolved
 
-    def _process_run_legacy(self, run_id: str) -> None:
+    def _process_run_legacy(self, run_id: str) -> bool:
         """Process a run using the legacy fixed plan->tool->eval flow."""
         run = self.repo.get_run(run_id)
         if not run:
-            return
+            return False
         if run["status"] == "canceled":
-            return
+            return False
 
         agent = self.repo.get_agent(run["agent_id"])
         if not agent:
             self.repo.update_run_status(run_id, "failed")
             self.repo.create_event(run_id, "run.failed", {"error": "agent_not_found"})
-            return
+            return False
 
         if agent.get("status") != "active":
             self.repo.update_run_status(run_id, "failed")
             self.repo.create_event(run_id, "run.failed", {"error": "agent_disabled"})
-            return
+            return False
 
         self.repo.update_run_status(run_id, "running")
         self.repo.create_event(
@@ -1010,12 +1016,12 @@ class Orchestrator:
                     run_id, "run.step_limit_reached", {"step_limit": step_limit}
                 )
                 self.repo.update_run_status(run_id, "failed")
-                return
+                return False
 
             latest = self.repo.get_run(run_id)
             if latest and latest["status"] == "canceled":
                 self.repo.create_event(run_id, "run.canceled", {"run_id": run_id})
-                return
+                return False
 
             step = self.repo.create_step(
                 run_id=run_id,
@@ -1078,7 +1084,8 @@ class Orchestrator:
                     "run.failed",
                     {"run_id": run_id, "error": result.get("error")},
                 )
-                return
+                return False
 
         self.repo.update_run_status(run_id, "succeeded")
         self.repo.create_event(run_id, "run.succeeded", {"run_id": run_id})
+        return False

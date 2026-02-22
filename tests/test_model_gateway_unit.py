@@ -230,6 +230,90 @@ def test_model_gateway_resolves_openai_tool_aliases(tmp_path, monkeypatch):
     assert result["args"] == {"url": "https://wikipedia.org"}
 
 
+def test_infer_with_openai_retries_required_tool_choice_on_missing_tool_call(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "model-openai-retry.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(
+        repo,
+        openai_tools_provider=lambda _: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+
+    calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        payload = json.loads(req.data.decode("utf-8"))
+        calls.append(payload)
+        if payload.get("tool_choice") == "auto":
+            return _Resp({"choices": [{"message": {"content": "No tool yet"}}]})
+        assert payload.get("tool_choice") == "required"
+        return _Resp(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json.dumps(
+                                            {"path": "README.md"}
+                                        ),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+
+    result = gateway._infer_with_openai(
+        task="read me",
+        model="gpt-4o-mini",
+        allowed_tools=["read_file"],
+    )
+    assert result == {"tool_name": "read_file", "args": {"path": "README.md"}}
+    assert len(calls) == 2
+    assert calls[0]["tool_choice"] == "auto"
+    assert calls[1]["tool_choice"] == "required"
+    assert calls[1]["messages"][0]["role"] == "system"
+
+
 def test_infer_with_model_covers_write_recall_remember_paths():
     gateway = ModelGateway(repo=None)
 
