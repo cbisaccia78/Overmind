@@ -15,7 +15,9 @@ from typing import Any
 
 from .policy import Policy
 from .repository import Repository
+from .supervisor import Supervisor
 from .tool_gateway import ToolGateway
+from .validator import ActionValidator
 
 
 @dataclass
@@ -40,6 +42,8 @@ class Orchestrator:
         tool_gateway: ToolGateway,
         policy: Policy,
         retry_config: RetryConfig | None = None,
+        supervisor: Supervisor | None = None,
+        validator: ActionValidator | None = None,
     ):
         """Create an orchestrator instance.
 
@@ -48,11 +52,15 @@ class Orchestrator:
             tool_gateway: Gateway used to execute allowed tools.
             policy: Policy that expands a task into planned actions.
             retry_config: Retry policy for tool failures.
+            supervisor: Strategic controller for per-turn directives.
+            validator: Validator for tool outcome quality/progress.
         """
         self.repo = repo
         self.tool_gateway = tool_gateway
         self.policy = policy
         self.retry_config = retry_config or RetryConfig()
+        self.supervisor = supervisor or Supervisor()
+        self.validator = validator or ActionValidator()
 
     def launch(self, run_id: str) -> None:
         """Launch processing for a run in a daemon background thread.
@@ -191,6 +199,24 @@ class Orchestrator:
                 self.repo.create_event(run_id, "run.canceled", {"run_id": run_id})
                 return False
 
+            directive = self.supervisor.decide(
+                task=run["task"],
+                history=history,
+                next_idx=idx,
+                step_limit=step_limit,
+                agent=agent,
+                context={"run_id": run_id, "step_limit": step_limit, "next_idx": idx},
+            )
+            directive_payload = directive.as_dict()
+            self.repo.create_event(
+                run_id,
+                "supervisor.decided",
+                {
+                    "run_id": run_id,
+                    "idx": idx,
+                    "directive": directive_payload,
+                },
+            )
             action = self.policy.next_action(
                 run["task"],
                 agent=agent,
@@ -199,6 +225,7 @@ class Orchestrator:
                     "step_limit": step_limit,
                     "history": history,
                     "failure_memory": self._build_failure_memory(history),
+                    "supervisor": directive_payload,
                 },
                 history=history,
             )
@@ -232,17 +259,36 @@ class Orchestrator:
                 )
                 if result.get("ok"):
                     consecutive_failures = 0
-                    self.repo.finish_step(step["id"], output_json=result)
+                    validation = self.validator.validate_tool_result(
+                        tool_name=tool_name,
+                        args=args,
+                        result=result,
+                        history=history,
+                    )
+                    result_with_validation = dict(result)
+                    result_with_validation["validation"] = validation
+                    self.repo.finish_step(step["id"], output_json=result_with_validation)
                     self.repo.create_event(
                         run_id,
                         "step.finished",
                         {"step_id": step["id"], "idx": idx, "ok": True},
                     )
+                    self.repo.create_event(
+                        run_id,
+                        "worker.validation",
+                        {
+                            "run_id": run_id,
+                            "step_id": step["id"],
+                            "idx": idx,
+                            "tool_name": tool_name,
+                            "validation": validation,
+                        },
+                    )
                     history.append(
                         {
                             "step_type": "tool",
                             "input": {"tool_name": tool_name, "args": args},
-                            "output": result,
+                            "output": result_with_validation,
                             "error": None,
                         }
                     )
@@ -316,12 +362,44 @@ class Orchestrator:
 
             if kind == "final_answer":
                 message = str(action.get("message") or "done")
+                is_error = bool(action.get("is_error"))
+                error_payload = action.get("error")
                 step = self.repo.create_step(
                     run_id=run_id,
                     idx=idx,
                     step_type="eval",
                     input_json={"result": "done"},
                 )
+                if is_error:
+                    error = (
+                        dict(error_payload)
+                        if isinstance(error_payload, dict)
+                        else {
+                            "code": "final_answer_error",
+                            "message": message,
+                        }
+                    )
+                    output = {
+                        "ok": False,
+                        "final_answer": message,
+                        "error": error,
+                    }
+                    self.repo.finish_step(
+                        step["id"], output_json=output, error=str(error.get("message") or message)
+                    )
+                    self.repo.create_event(
+                        run_id,
+                        "step.finished",
+                        {"step_id": step["id"], "idx": idx, "ok": False},
+                    )
+                    self.repo.update_run_status(run_id, "failed")
+                    self.repo.create_event(
+                        run_id,
+                        "run.failed",
+                        {"run_id": run_id, "error": error},
+                    )
+                    return False
+
                 output = {"ok": True, "final_answer": message}
                 self.repo.finish_step(step["id"], output_json=output)
                 self.repo.create_event(
@@ -435,6 +513,8 @@ class Orchestrator:
         if kind == "final_answer":
             message = str(action.get("message") or "").strip()
             payload["message"] = message[:280] if message else ""
+            if "is_error" in action:
+                payload["is_error"] = bool(action.get("is_error"))
             return payload
         if kind == "verify":
             payload["checks"] = list(action.get("checks") or [])

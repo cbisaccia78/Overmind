@@ -415,15 +415,46 @@ def _normalize_mcp_text(text: str) -> str:
     if not value:
         return ""
 
-    match = re.search(
-        r"TextContent\(\s*type=(?:'|\")text(?:'|\"),\s*text=(?P<quote>'|\")(?P<body>.*?)(?<!\\)(?P=quote)\s*\)",
-        value,
-        flags=re.DOTALL,
-    )
-    if match:
-        value = match.group("body")
+    wrapped = _extract_textcontent_body(value)
+    if wrapped:
+        value = wrapped
 
     return _unescape_common_sequences(value).strip()
+
+
+def _extract_textcontent_body(value: str) -> str:
+    """Extract `text=` payload from wrapped `TextContent(...)` strings."""
+    text = str(value or "")
+    marker = "TextContent("
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    text_idx = text.find("text=", start)
+    if text_idx < 0:
+        return ""
+
+    quote_idx = text_idx + len("text=")
+    if quote_idx >= len(text):
+        return ""
+    quote = text[quote_idx]
+    if quote not in {"'", '"'}:
+        return ""
+
+    chars: list[str] = []
+    escaped = False
+    for ch in text[quote_idx + 1 :]:
+        if escaped:
+            chars.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            chars.append(ch)
+            escaped = True
+            continue
+        if ch == quote:
+            return "".join(chars)
+        chars.append(ch)
+    return ""
 
 
 def _unescape_common_sequences(value: str) -> str:

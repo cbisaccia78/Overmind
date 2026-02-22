@@ -176,7 +176,10 @@ class ModelDrivenPolicy(Policy):
         agent: dict[str, Any],
         context: PlanContext,
     ) -> dict[str, Any]:
-        inference = self.model_gateway.infer(task=prompt, agent=agent, context=context)
+        final_prompt = self._apply_supervisor_directive(prompt=prompt, context=context)
+        inference = self.model_gateway.infer(
+            task=final_prompt, agent=agent, context=context
+        )
         if not inference.get("ok"):
             message = inference.get("error", {}).get(
                 "message", "model inference failed"
@@ -192,8 +195,59 @@ class ModelDrivenPolicy(Policy):
             return {
                 "kind": "final_answer",
                 "message": f"I could not infer the next tool action: {message}",
+                "is_error": True,
+                "error": {
+                    "code": "model_inference_error",
+                    "message": message,
+                },
             }
         return self._action_from_inference(inference)
+
+    @staticmethod
+    def _apply_supervisor_directive(prompt: str, context: PlanContext) -> str:
+        """Append supervisor strategic context when available."""
+        text = str(prompt or "").strip()
+        supervisor = context.get("supervisor")
+        if not isinstance(supervisor, dict) or not supervisor:
+            return text
+        if "Supervisor directive:" in text:
+            return text
+        block = ModelDrivenPolicy._render_supervisor_directive(supervisor)
+        if not block:
+            return text
+        return f"{text}\n\n{block}".strip()
+
+    @staticmethod
+    def _render_supervisor_directive(supervisor: dict[str, Any]) -> str:
+        """Render supervisor directive into compact prompt text."""
+        mode = str(supervisor.get("mode") or "").strip()
+        phase = str(supervisor.get("phase") or "").strip()
+        rationale = str(supervisor.get("rationale") or "").strip()
+        micro_plan = list(supervisor.get("micro_plan") or [])
+        success_criteria = list(supervisor.get("success_criteria") or [])
+        budget = dict(supervisor.get("budget") or {})
+
+        lines = ["Supervisor directive:"]
+        if mode:
+            lines.append(f"- Mode: {mode}")
+        if phase:
+            lines.append(f"- Phase: {phase}")
+        if rationale:
+            lines.append(f"- Rationale: {rationale}")
+        if micro_plan:
+            lines.append("- Micro-plan:")
+            for idx, step in enumerate(micro_plan[:5], 1):
+                lines.append(f"  {idx}. {step}")
+        if success_criteria:
+            lines.append("- Success criteria:")
+            for idx, item in enumerate(success_criteria[:4], 1):
+                lines.append(f"  {idx}. {item}")
+        if budget:
+            budget_text = ", ".join(
+                f"{key}={value}" for key, value in sorted(budget.items())
+            )
+            lines.append(f"- Budget: {budget_text}")
+        return "\n".join(lines)
 
     @staticmethod
     def _build_initial_prompt(

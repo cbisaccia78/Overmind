@@ -45,6 +45,7 @@ from .schemas import (
     RunInputRequest,
     ToolCallRequest,
 )
+from .supervisor import Supervisor
 from .tool_gateway import ToolGateway
 
 
@@ -106,11 +107,13 @@ class AppState:
             self.repo,
             openai_tools_provider=self.gateway.list_openai_tools_with_aliases,
         )
+        self.supervisor = Supervisor(model_gateway=self.model_gateway)
         self.policy = policy or ModelDrivenPolicy(model_gateway=self.model_gateway)
         self.orchestrator = Orchestrator(
             repo=self.repo,
             tool_gateway=self.gateway,
             policy=self.policy,
+            supervisor=self.supervisor,
         )
 
     def _recover_interrupted_runs(self) -> None:

@@ -591,3 +591,128 @@ def test_orchestrator_emits_plan_action_selected_event():
         == "mcp.playwright.browser_snapshot"
         for call in repo.create_event.call_args_list
     )
+
+
+def test_orchestrator_final_answer_error_marks_run_failed():
+    class _ErrorPolicy:
+        def next_action(self, *_args, **_kwargs):
+            return {
+                "kind": "final_answer",
+                "message": "I could not infer the next tool action: timeout",
+                "is_error": True,
+                "error": {
+                    "code": "model_inference_error",
+                    "message": "openai request failed: timeout",
+                },
+            }
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r11",
+            "status": "queued",
+            "agent_id": "a11",
+            "task": "do thing",
+            "step_limit": 4,
+        },
+        {"id": "r11", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a11",
+        "status": "active",
+        "tools_allowed": ["run_shell"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [{"id": "s-plan"}, {"id": "s-final"}]
+
+    gateway = MagicMock()
+    orch = _orchestrator_with(repo, gateway, _ErrorPolicy())
+    orch.process_run("r11")
+
+    repo.update_run_status.assert_any_call("r11", "failed")
+    repo.create_event.assert_any_call(
+        "r11",
+        "run.failed",
+        {
+            "run_id": "r11",
+            "error": {
+                "code": "model_inference_error",
+                "message": "openai request failed: timeout",
+            },
+        },
+    )
+
+
+def test_orchestrator_emits_supervisor_and_validation_events():
+    class _ToolThenDonePolicy:
+        def __init__(self):
+            self.calls = 0
+            self.contexts: list[dict] = []
+
+        def next_action(self, *_args, **kwargs):
+            self.contexts.append(kwargs["context"])
+            if self.calls == 0:
+                self.calls += 1
+                return {
+                    "kind": "tool_call",
+                    "tool_name": "mcp.playwright.browser_snapshot",
+                    "args": {},
+                }
+            return {"kind": "final_answer", "message": "done"}
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r12",
+            "status": "queued",
+            "agent_id": "a12",
+            "task": "inspect page and continue",
+            "step_limit": 6,
+        },
+        {"id": "r12", "status": "running"},
+        {"id": "r12", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a12",
+        "status": "active",
+        "tools_allowed": ["mcp.playwright.browser_snapshot"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [
+        {"id": "s-plan"},
+        {"id": "s-tool"},
+        {"id": "s-final"},
+    ]
+
+    gateway = MagicMock()
+    gateway.call.return_value = {
+        "ok": True,
+        "observation": {
+            "summary": "MCP tool `browser_snapshot` completed.",
+            "action_candidates": ["Home", "Search"],
+        },
+    }
+
+    policy = _ToolThenDonePolicy()
+    orch = _orchestrator_with(repo, gateway, policy)
+    orch.process_run("r12")
+
+    assert "supervisor" in policy.contexts[0]
+    assert policy.contexts[0]["supervisor"]["mode"] in {
+        "exploration",
+        "execution",
+        "recovery",
+    }
+    assert any(
+        call.args[1] == "supervisor.decided" for call in repo.create_event.call_args_list
+    )
+    assert any(
+        call.args[1] == "worker.validation" for call in repo.create_event.call_args_list
+    )
+
+    tool_finish = next(
+        call
+        for call in repo.finish_step.call_args_list
+        if call.args and call.args[0] == "s-tool"
+    )
+    assert "validation" in tool_finish.kwargs["output_json"]

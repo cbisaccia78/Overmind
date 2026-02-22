@@ -134,6 +134,99 @@ class ModelGateway:
         result["latency_ms"] = latency_ms
         return result
 
+    def advise_supervisor(
+        self,
+        *,
+        task: str,
+        agent: dict[str, Any],
+        context: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return structured advisory planning hints for supervisor usage.
+
+        The returned advice is always sanitized and bounded. The deterministic
+        supervisor remains authoritative for budgets and transitions.
+        """
+        model = str(agent.get("model") or "stub-v1")
+        request_json = {
+            "kind": "supervisor_advice",
+            "task": task,
+            "agent_id": agent.get("id"),
+            "model": model,
+            "context": context,
+            "state": state,
+        }
+
+        start = time.monotonic()
+        try:
+            model_name = str(model or "").strip().lower()
+            if model_name.startswith("deepseek") and os.getenv("DEEPSEEK_API_KEY"):
+                raw = self._advise_with_openai_compatible(
+                    model=model,
+                    api_key=os.getenv("DEEPSEEK_API_KEY") or "",
+                    endpoint=os.getenv(
+                        "OVERMIND_DEEPSEEK_CHAT_COMPLETIONS_URL",
+                        "https://api.deepseek.com/v1/chat/completions",
+                    ),
+                    task=task,
+                    state=state,
+                )
+            elif os.getenv("OPENAI_API_KEY"):
+                raw = self._advise_with_openai_compatible(
+                    model=model,
+                    api_key=os.getenv("OPENAI_API_KEY") or "",
+                    endpoint=os.getenv(
+                        "OVERMIND_OPENAI_CHAT_COMPLETIONS_URL",
+                        "https://api.openai.com/v1/chat/completions",
+                    ),
+                    task=task,
+                    state=state,
+                )
+            else:
+                raw = self._advise_with_model(task=task, state=state)
+
+            advice = self._sanitize_supervisor_advice(raw)
+            response_json = {"advice": advice}
+            usage_json = self._estimate_usage(task=task, response=response_json)
+            result: dict[str, Any] = {
+                "ok": True,
+                "model": model,
+                "advice": advice,
+                "response": response_json,
+                "usage": usage_json,
+            }
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            fallback = self._sanitize_supervisor_advice(
+                self._advise_with_model(task=task, state=state)
+            )
+            response_json = {"advice": fallback}
+            usage_json = self._estimate_usage(task=task, response=response_json)
+            result = {
+                "ok": False,
+                "model": model,
+                "advice": fallback,
+                "error": {"code": "model_error", "message": str(exc)},
+                "response": response_json,
+                "usage": usage_json,
+            }
+            error = str(exc)
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if self.repo is not None:
+            self.repo.create_model_call(
+                run_id=context.get("run_id"),
+                agent_id=agent.get("id"),
+                model=model,
+                request_json=request_json,
+                response_json=result.get("response", {}),
+                usage_json=result.get("usage", {}),
+                error=error,
+                latency_ms=latency_ms,
+            )
+        result["latency_ms"] = latency_ms
+        return result
+
     def _should_use_openai(self, allowed_tools: list[str]) -> bool:
         """Return whether OpenAI tool-calling should be used.
 
@@ -149,6 +242,225 @@ class ModelGateway:
             and allowed_tools
             and self.openai_tools_provider is not None
         )
+
+    def _advise_with_openai_compatible(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        endpoint: str,
+        task: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Request structured supervisor advice via OpenAI-compatible chat API."""
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._supervisor_system_prompt()},
+                {
+                    "role": "user",
+                    "content": self._supervisor_user_prompt(task=task, state=state),
+                },
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        data = self._request_openai_chat_completion(
+            payload=payload,
+            api_key=api_key,
+            endpoint=endpoint,
+            timeout_s=timeout_s,
+        )
+        return self._parse_supervisor_json_response(data)
+
+    @staticmethod
+    def _supervisor_system_prompt() -> str:
+        return (
+            "You are a supervisor planning assistant for a browser agent.\n"
+            "Return only one JSON object with keys:\n"
+            "mode, phase, rationale, micro_plan, success_criteria.\n"
+            "Rules:\n"
+            "- mode must be one of exploration, execution, recovery.\n"
+            "- micro_plan must be 1-5 short actionable steps.\n"
+            "- success_criteria must be 1-4 measurable checks.\n"
+            "- Do not include tool calls, code, or prose outside JSON."
+        )
+
+    @staticmethod
+    def _supervisor_user_prompt(task: str, state: dict[str, Any]) -> str:
+        compact_state = json.dumps(state, separators=(",", ":"), ensure_ascii=True)
+        if len(compact_state) > 5000:
+            compact_state = compact_state[:5000] + "..."
+        return (
+            "Goal:\n"
+            f"{task.strip()}\n\n"
+            "Current state snapshot (JSON):\n"
+            f"{compact_state}\n\n"
+            "Return the next advisory directive JSON."
+        )
+
+    def _parse_supervisor_json_response(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Parse JSON content from chat completion response."""
+        content = self._extract_message_content(data)
+        if not content:
+            raise RuntimeError("openai response missing content")
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        candidate = self._extract_first_json_object(content)
+        if not candidate:
+            raise RuntimeError("openai response missing valid json object")
+        parsed = json.loads(candidate)
+        if not isinstance(parsed, dict):
+            raise RuntimeError("openai response json must be object")
+        return parsed
+
+    @staticmethod
+    def _extract_message_content(data: dict[str, Any]) -> str:
+        """Extract chat message content as plain text."""
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts).strip()
+        return ""
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """Return first top-level JSON object substring if present."""
+        raw = str(text or "")
+        start = raw.find("{")
+        if start < 0:
+            return ""
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx, ch in enumerate(raw[start:], start=start):
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[start : idx + 1]
+        return ""
+
+    def _advise_with_model(self, *, task: str, state: dict[str, Any]) -> dict[str, Any]:
+        """Deterministic fallback advisory planner for local/dev operation."""
+        directive = state.get("directive")
+        if not isinstance(directive, dict):
+            directive = {}
+        mode = str(directive.get("mode") or "execution").strip().lower()
+        phase = str(directive.get("phase") or "execute_objective").strip()
+        rationale = str(
+            directive.get("rationale") or "deterministic advisory fallback"
+        ).strip()
+        micro_plan = directive.get("micro_plan")
+        success_criteria = directive.get("success_criteria")
+
+        lowered = str(task or "").lower()
+        if "login" in lowered or "sign in" in lowered:
+            mode = "execution"
+            phase = "authenticate"
+            rationale = "goal implies authentication workflow"
+        elif "error" in lowered or "fix" in lowered:
+            mode = "recovery"
+            phase = "recover_progress"
+            rationale = "goal implies remediation or recovery path"
+
+        if not isinstance(micro_plan, list) or not micro_plan:
+            micro_plan = [
+                "Take one objective-aligned action.",
+                "Validate immediate effect.",
+                "Switch path if no progress signal appears.",
+            ]
+        if not isinstance(success_criteria, list) or not success_criteria:
+            success_criteria = [
+                "state changes in objective-relevant way",
+                "validation indicates progress",
+            ]
+
+        return {
+            "mode": mode,
+            "phase": phase,
+            "rationale": rationale,
+            "micro_plan": micro_plan,
+            "success_criteria": success_criteria,
+        }
+
+    @staticmethod
+    def _sanitize_supervisor_advice(advice: dict[str, Any] | None) -> dict[str, Any]:
+        """Clamp advisory output to safe deterministic schema bounds."""
+        payload = advice if isinstance(advice, dict) else {}
+        mode = str(payload.get("mode") or "execution").strip().lower()
+        if mode not in {"exploration", "execution", "recovery"}:
+            mode = "execution"
+
+        def _clean_text(value: Any, max_len: int) -> str:
+            text = " ".join(str(value or "").split()).strip()
+            if not text:
+                return ""
+            if len(text) <= max_len:
+                return text
+            return text[:max_len].rstrip() + "..."
+
+        def _clean_items(value: Any, max_items: int) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            items: list[str] = []
+            for item in value:
+                text = _clean_text(item, 180)
+                if not text:
+                    continue
+                items.append(text)
+                if len(items) >= max_items:
+                    break
+            return items
+
+        phase = _clean_text(payload.get("phase"), 64) or "execute_objective"
+        rationale = _clean_text(payload.get("rationale"), 220) or "no rationale provided"
+        micro_plan = _clean_items(payload.get("micro_plan"), 5) or [
+            "Take one objective-aligned action.",
+            "Validate immediate effect.",
+        ]
+        success_criteria = _clean_items(payload.get("success_criteria"), 4) or [
+            "state changes in objective-relevant way"
+        ]
+        return {
+            "mode": mode,
+            "phase": phase,
+            "rationale": rationale,
+            "micro_plan": micro_plan,
+            "success_criteria": success_criteria,
+        }
 
     def _should_use_deepseek(self, *, model: str, allowed_tools: list[str]) -> bool:
         """Return whether DeepSeek tool-calling should be used."""

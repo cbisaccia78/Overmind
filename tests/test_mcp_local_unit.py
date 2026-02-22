@@ -226,6 +226,19 @@ def test_structured_observation_extracts_generic_page_metadata() -> None:
     assert "- button \"Post\"" not in observation["text"]
 
 
+def test_normalize_mcp_text_unwraps_textcontent_with_trailing_fields() -> None:
+    wrapped = (
+        "CallToolResult(content=[TextContent(type='text', text='### Result\\n"
+        "{\"count\":2,\"ok\":true}', annotations=None, meta=None)], "
+        "structured_content=None, meta=None, data=None, is_error=False)"
+    )
+    normalized = mcp_local._normalize_mcp_text(wrapped)
+
+    assert normalized.startswith("### Result")
+    assert '"count":2' in normalized
+    assert "CallToolResult(" not in normalized
+
+
 def test_close_sessions_and_get_or_create_session_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

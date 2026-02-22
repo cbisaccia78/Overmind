@@ -183,6 +183,11 @@ def test_next_action_other_inference_error_returns_final_answer():
     assert action == {
         "kind": "final_answer",
         "message": "I could not infer the next tool action: openai request failed: timeout",
+        "is_error": True,
+        "error": {
+            "code": "model_inference_error",
+            "message": "openai request failed: timeout",
+        },
     }
 
 
@@ -596,3 +601,38 @@ def test_render_recent_history_includes_tools_and_statuses():
     assert 'tool b args={"url":"https://x.com"} -> failed' in rendered
     assert "verify -> ok" in rendered
     assert "ask_user" in rendered
+
+
+def test_next_action_includes_supervisor_directive_when_present():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "read_file",
+                "args": {"path": "README.md"},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    _ = policy.next_action(
+        "read docs",
+        agent={"tools_allowed": ["read_file"]},
+        context={
+            "run_id": "r1",
+            "supervisor": {
+                "mode": "execution",
+                "phase": "execute_objective",
+                "rationale": "enough context for direct execution",
+                "micro_plan": ["take one step", "validate outcome"],
+                "success_criteria": ["state changed"],
+                "budget": {"max_steps": 4},
+            },
+        },
+        history=[],
+    )
+
+    prompt = gateway.calls[0]["task"]
+    assert "Supervisor directive:" in prompt
+    assert "- Mode: execution" in prompt
+    assert "- Phase: execute_objective" in prompt
