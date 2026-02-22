@@ -27,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 from .db import init_db, resolve_db_path
 from .deterministic_policy import DeterministicPolicy
+from .mcp_local import LocalMcpServerConfig
 from .memory import LocalVectorMemory
 from .model_gateway import ModelGateway
 from .orchestrator import Orchestrator
@@ -36,6 +37,7 @@ from .shell_runner import ShellRunner
 from .schemas import (
     AgentCreate,
     AgentUpdate,
+    McpLocalServerRequest,
     MemorySearchRequest,
     MemoryStoreRequest,
     RunCreate,
@@ -48,15 +50,6 @@ from .tool_gateway import ToolGateway
 WORKSPACE_ROOT = str(
     Path(os.getenv("OVERMIND_WORKSPACE", Path(__file__).resolve().parents[1])).resolve()
 )
-
-AVAILABLE_TOOLS = [
-    "run_shell",
-    "read_file",
-    "write_file",
-    "store_memory",
-    "search_memory",
-    "final_answer",
-]
 
 
 class AppState:
@@ -151,6 +144,11 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 def _services() -> AppState:
     """Return the singleton `AppState` stored on the FastAPI app."""
     return app.state.services
+
+
+def _available_tools() -> list[str]:
+    """Return currently available tools, including discovered MCP tools."""
+    return _services().gateway.list_tool_names()
 
 
 def _mask_openai_key(key: str | None) -> str:
@@ -597,6 +595,49 @@ def get_openai_key_status() -> dict[str, Any]:
     }
 
 
+@app.get("/api/settings/mcp/servers")
+def list_mcp_local_servers() -> dict[str, Any]:
+    """List configured local MCP servers."""
+    servers = _services().gateway.list_local_mcp_servers()
+    return {
+        "ok": True,
+        "servers": [
+            {
+                "id": server.id,
+                "command": server.command,
+                "args": server.args,
+                "env": server.env,
+                "enabled": server.enabled,
+            }
+            for server in servers
+        ],
+    }
+
+
+@app.post("/api/settings/mcp/servers")
+def upsert_mcp_local_server(payload: McpLocalServerRequest) -> dict[str, Any]:
+    """Create or replace a local MCP server config."""
+    _services().gateway.upsert_local_mcp_server(
+        config=LocalMcpServerConfig(
+            id=payload.id.strip(),
+            command=payload.command.strip(),
+            args=[arg.strip() for arg in payload.args if arg.strip()],
+            env={str(k): str(v) for k, v in payload.env.items()},
+            enabled=payload.enabled,
+        )
+    )
+    return list_mcp_local_servers()
+
+
+@app.delete("/api/settings/mcp/servers/{server_id}")
+def delete_mcp_local_server(server_id: str) -> dict[str, Any]:
+    """Delete one local MCP server config."""
+    removed = _services().gateway.remove_local_mcp_server(server_id.strip())
+    if not removed:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    return list_mcp_local_servers()
+
+
 # Basic UI
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
@@ -635,13 +676,13 @@ def agents_page(request: Request) -> HTMLResponse:
         "agents.html",
         {
             "agents": _services().repo.list_agents(),
-            "available_tools": AVAILABLE_TOOLS,
+            "available_tools": _available_tools(),
             "form_error": None,
             "form_values": {
                 "name": "",
                 "role": "operator",
                 "model": "",
-                "tools": list(AVAILABLE_TOOLS),
+                "tools": _available_tools(),
             },
         },
     )
@@ -669,7 +710,7 @@ async def create_agent_form(request: Request) -> Response:
             "agents.html",
             {
                 "agents": _services().repo.list_agents(),
-                "available_tools": AVAILABLE_TOOLS,
+                "available_tools": _available_tools(),
                 "form_error": "Name, role, and model are required.",
                 "form_values": {
                     "name": name,
@@ -863,12 +904,14 @@ def run_detail_page(run_id: str, request: Request) -> HTMLResponse:
 def settings_page(request: Request) -> HTMLResponse:
     """Render application settings page."""
     status = get_openai_key_status()
+    mcp_servers = list_mcp_local_servers()["servers"]
     return templates.TemplateResponse(
         request,
         "settings.html",
         {
             "openai_configured": status["configured"],
             "openai_masked": status["masked"],
+            "mcp_servers": mcp_servers,
             "settings_error": None,
             "settings_message": None,
         },
@@ -914,12 +957,70 @@ async def settings_openai_form(request: Request) -> HTMLResponse:
             settings_message = "OpenAI API key saved."
 
     status = get_openai_key_status()
+    mcp_servers = list_mcp_local_servers()["servers"]
     return templates.TemplateResponse(
         request,
         "settings.html",
         {
             "openai_configured": status["configured"],
             "openai_masked": status["masked"],
+            "mcp_servers": mcp_servers,
+            "settings_error": settings_error,
+            "settings_message": settings_message,
+        },
+        status_code=422 if settings_error else 200,
+    )
+
+
+@app.post("/settings/mcp", response_class=HTMLResponse)
+async def settings_mcp_form(request: Request) -> HTMLResponse:
+    """Handle local MCP server add/remove actions from settings page."""
+    form = await _parse_urlencoded_form(request)
+    action = (form.get("action") or "add").strip().lower()
+    server_id = (form.get("mcp_id") or "").strip()
+    command = (form.get("mcp_command") or "").strip()
+    args_raw = (form.get("mcp_args") or "").strip()
+
+    settings_error: str | None = None
+    settings_message: str | None = None
+
+    if action == "remove":
+        if not server_id:
+            settings_error = "MCP server id is required to remove."
+        else:
+            removed = _services().gateway.remove_local_mcp_server(server_id)
+            if removed:
+                settings_message = f"Removed MCP server '{server_id}'."
+            else:
+                settings_error = "MCP server not found."
+    else:
+        if not server_id or not command:
+            settings_error = "MCP server id and command are required."
+        else:
+            args = (
+                [part for part in args_raw.split(" ") if part.strip()]
+                if args_raw
+                else []
+            )
+            payload = McpLocalServerRequest(
+                id=server_id,
+                command=command,
+                args=args,
+                env={},
+                enabled=True,
+            )
+            upsert_mcp_local_server(payload)
+            settings_message = f"Saved MCP server '{server_id}'."
+
+    status = get_openai_key_status()
+    mcp_servers = list_mcp_local_servers()["servers"]
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "openai_configured": status["configured"],
+            "openai_masked": status["masked"],
+            "mcp_servers": mcp_servers,
             "settings_error": settings_error,
             "settings_message": settings_message,
         },

@@ -8,10 +8,17 @@ audit events.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .mcp_local import (
+    LocalMcpServerConfig,
+    call_tool as call_local_mcp_tool,
+    discover_tools as discover_local_mcp_tools,
+    parse_local_mcp_servers,
+)
 from .memory import LocalVectorMemory
 from .repository import Repository
 from .shell_runner import ShellRunner
@@ -22,8 +29,10 @@ class ToolSpec:
     """Registry entry for a supported tool."""
 
     name: str
-    args_schema: dict[str, dict[str, Any]]
+    args_schema: dict[str, dict[str, Any]] | None
     handler: Callable[[dict[str, Any]], dict[str, Any]]
+    json_schema: dict[str, Any] | None = None
+    validate_args: bool = True
 
 
 class ToolGateway:
@@ -37,6 +46,7 @@ class ToolGateway:
         "search_memory": "Search memory items in a named collection.",
         "final_answer": "Finish the run by returning a final answer message (no side effects).",
     }
+    _MCP_SETTINGS_KEY = "mcp_local_servers"
 
     def __init__(
         self,
@@ -61,6 +71,7 @@ class ToolGateway:
         self.workspace_root = Path(workspace_root).resolve()
         self.max_file_bytes = max_file_bytes
         self._tool_registry: dict[str, ToolSpec] = self._build_registry()
+        self._refresh_mcp_registry()
 
     def _build_registry(self) -> dict[str, ToolSpec]:
         """Create the registry of supported tools and schemas."""
@@ -151,6 +162,89 @@ class ToolGateway:
             ),
         }
 
+    def _refresh_mcp_registry(self) -> None:
+        """Load enabled local MCP servers from settings and register their tools."""
+        for tool_name in [
+            name for name in self._tool_registry if name.startswith("mcp.")
+        ]:
+            self._tool_registry.pop(tool_name, None)
+            self._TOOL_DESCRIPTIONS.pop(tool_name, None)
+
+        for config in self.list_local_mcp_servers():
+            if not config.enabled:
+                continue
+            try:
+                tools = discover_local_mcp_tools(config)
+            except Exception:
+                continue
+            for tool in tools:
+                self._TOOL_DESCRIPTIONS[tool.local_name] = tool.description
+                self._tool_registry[tool.local_name] = ToolSpec(
+                    name=tool.local_name,
+                    args_schema=None,
+                    json_schema=tool.input_schema,
+                    validate_args=False,
+                    handler=self._make_mcp_handler(
+                        config=config,
+                        remote_tool_name=tool.remote_name,
+                    ),
+                )
+
+    def _make_mcp_handler(
+        self,
+        *,
+        config: LocalMcpServerConfig,
+        remote_tool_name: str,
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        def _handler(args: dict[str, Any]) -> dict[str, Any]:
+            return call_local_mcp_tool(
+                config=config,
+                remote_name=remote_tool_name,
+                args=args,
+            )
+
+        return _handler
+
+    def list_local_mcp_servers(self) -> list[LocalMcpServerConfig]:
+        """Return local MCP server configs from app settings."""
+        raw = self.repo.get_setting(self._MCP_SETTINGS_KEY)
+        return parse_local_mcp_servers(raw)
+
+    def set_local_mcp_servers(self, configs: list[LocalMcpServerConfig]) -> None:
+        """Persist local MCP server configs and refresh registered MCP tools."""
+        payload = [
+            {
+                "id": cfg.id,
+                "command": cfg.command,
+                "args": cfg.args,
+                "env": cfg.env,
+                "enabled": cfg.enabled,
+            }
+            for cfg in configs
+        ]
+        self.repo.set_setting(self._MCP_SETTINGS_KEY, json.dumps(payload))
+        self._refresh_mcp_registry()
+
+    def upsert_local_mcp_server(self, config: LocalMcpServerConfig) -> None:
+        """Create or replace one local MCP server config by id."""
+        existing = [cfg for cfg in self.list_local_mcp_servers() if cfg.id != config.id]
+        existing.append(config)
+        existing.sort(key=lambda cfg: cfg.id)
+        self.set_local_mcp_servers(existing)
+
+    def remove_local_mcp_server(self, server_id: str) -> bool:
+        """Remove one local MCP server config by id."""
+        existing = self.list_local_mcp_servers()
+        filtered = [cfg for cfg in existing if cfg.id != server_id]
+        if len(filtered) == len(existing):
+            return False
+        self.set_local_mcp_servers(filtered)
+        return True
+
+    def list_tool_names(self) -> list[str]:
+        """Return all currently registered tool names."""
+        return list(self._tool_registry.keys())
+
     def list_tool_specs(self, tool_names: list[str] | None = None) -> list[ToolSpec]:
         """List registered tool specs, optionally filtered by name.
 
@@ -179,6 +273,16 @@ class ToolGateway:
         """
         tools: list[dict[str, Any]] = []
         for spec in self.list_tool_specs(tool_names):
+            if spec.json_schema is not None:
+                parameters = spec.json_schema
+            elif spec.args_schema is not None:
+                parameters = self._args_schema_to_json_schema(spec.args_schema)
+            else:
+                parameters = {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                }
             tools.append(
                 {
                     "type": "function",
@@ -188,9 +292,7 @@ class ToolGateway:
                             spec.name,
                             f"Invoke tool {spec.name}",
                         ),
-                        "parameters": self._args_schema_to_json_schema(
-                            spec.args_schema
-                        ),
+                        "parameters": parameters,
                     },
                 }
             )
@@ -366,13 +468,24 @@ class ToolGateway:
                 "error": {"code": "unknown_tool", "message": tool_name},
             }
 
-        validated = self._validate_args(spec, args)
-        if isinstance(validated, dict) and validated.get("ok") is False:
-            return validated
-        return spec.handler(validated)
+        if not isinstance(args, dict):
+            return {
+                "ok": False,
+                "error": {"code": "bad_args", "message": "args must be an object"},
+            }
+
+        if spec.validate_args:
+            validated = self._validate_args(spec, args)
+            if isinstance(validated, dict) and validated.get("ok") is False:
+                return validated
+            return spec.handler(validated)
+
+        return spec.handler(args)
 
     def _validate_args(self, spec: ToolSpec, args: dict[str, Any]) -> dict[str, Any]:
         """Validate and normalize args against a tool schema."""
+        if spec.args_schema is None:
+            return args
         unknown = sorted(set(args.keys()) - set(spec.args_schema.keys()))
         if unknown:
             return {
@@ -518,4 +631,4 @@ class ToolGateway:
 
     @staticmethod
     def _handle_final_answer(args: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, "message": str(args["message"]) }
+        return {"ok": True, "message": str(args["message"])}

@@ -105,6 +105,16 @@ class ToolCallRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+class McpLocalServerRequest(BaseModel):
+    """Request schema for creating/updating a local MCP server config."""
+
+    id: str = Field(min_length=1)
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
 class RunInputRequest(BaseModel):
     """Request schema for supplying user input to a paused run.
 

@@ -35,4 +35,46 @@
     </div>
   </form>
 </section>
+
+<section class="card">
+  <h3>Local MCP Servers</h3>
+  <p class="muted">Register local stdio MCP servers. Discovered tools appear in the agent tool picker as <code>mcp.&lt;server_id&gt;.&lt;tool&gt;</code>.</p>
+
+  <form method="post" action="/settings/mcp" class="form-grid">
+    <label>
+      Server ID
+      <input type="text" name="mcp_id" placeholder="filesystem" autocomplete="off" />
+    </label>
+    <label>
+      Command
+      <input type="text" name="mcp_command" placeholder="npx" autocomplete="off" />
+    </label>
+    <label>
+      Args (space-separated)
+      <input type="text" name="mcp_args" placeholder="-y @modelcontextprotocol/server-filesystem /home/cole/code/overmind" autocomplete="off" />
+    </label>
+    <div class="hero-actions">
+      <button class="primary" type="submit" name="action" value="add">Save Server</button>
+      <button type="submit" name="action" value="remove">Remove Server</button>
+    </div>
+  </form>
+
+  {% if mcp_servers %}
+    <table class="data-table">
+      <thead><tr><th>ID</th><th>Command</th><th>Args</th><th>Enabled</th></tr></thead>
+      <tbody>
+        {% for server in mcp_servers %}
+        <tr>
+          <td>{{ server.id }}</td>
+          <td>{{ server.command }}</td>
+          <td>{{ server.args|join(' ') }}</td>
+          <td>{{ server.enabled }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No MCP servers configured.</p>
+  {% endif %}
+</section>
 {% endblock %}
