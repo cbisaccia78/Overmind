@@ -3,14 +3,57 @@
 [![CI](https://github.com/cbisaccia78/Overmind/actions/workflows/ci.yml/badge.svg)](https://github.com/cbisaccia78/Overmind/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/cbisaccia78/overmind/branch/main/graph/badge.svg)](https://app.codecov.io/github/cbisaccia78/overmind)
 
-Repo contains a runnable single-process app with:
-- Agent Registry (CRUD + version increments)
-- Deterministic Orchestrator (step loop, retries, step limit)
-- Tool Gateway (allowlist + strict arg validation + audit log)
-- Host Shell Runner (direct host OS execution)
-- Memory (FTS-backed retrieval + optional embeddings)
-- Structured Logs/Telemetry (events + replay timeline + tool/model call audit)
-- Desktop Dashboard via Electron (agents, runs, run detail)
+Overmind is a local desktop app for running and monitoring AI agents on your own machine.
+It’s designed to feel like a control panel: create agents, start runs, see tool/model calls, and replay what happened.
+
+## Install
+
+The easiest way to use overmind is to download the latest release from the GitHub Releases page.
+
+- AppImage: `Overmind-<version>.AppImage`
+  
+
+  ```bash
+  chmod +x Overmind-<version>.AppImage
+  ./Overmind-<version>.AppImage
+  ```
+
+- Debian/Ubuntu package: `overmind-desktop_<version>_amd64.deb`
+
+
+  ```bash
+  sudo apt install ./overmind-desktop_<version>_amd64.deb
+  ```
+
+## Run from Source (Development)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+npm install
+make dev
+```
+
+`make dev` launches the Electron desktop app and starts the Python backend automatically.
+
+If you only want the API server during development:
+
+```bash
+make api-dev
+```
+
+Tests:
+
+```bash
+make test
+```
+
+Full test run:
+
+```bash
+make test-full
+```
 
 ## Architecture
 
@@ -20,6 +63,13 @@ Electron desktop shell + single-process Python FastAPI backend:
 - In-process worker threads for orchestrator run execution
 - SQLite for local persistence
 - Host shell runner
+- Agent Registry (CRUD + version increments)
+- Deterministic Orchestrator (step loop, retries, step limit)
+- Tool Gateway (allowlist + strict arg validation + audit log)
+- Host Shell Runner (direct host OS execution)
+- Memory (FTS-backed retrieval + optional embeddings)
+- Structured Logs/Telemetry (events + replay timeline + tool/model call audit)
+- Desktop Dashboard via Electron (agents, runs, run detail)
 
 Key files:
 - [app/main.py](app/main.py)
@@ -40,24 +90,6 @@ SQLite tables implemented in [app/db.py](app/db.py):
 - `model_calls(id, run_id, agent_id, model, request_json, response_json, usage_json, error, latency_ms, created_at)`
 - `memory_items(id, collection, text, embedding, embedding_model, dims, metadata_json, created_at)`
 - `events(id, run_id, type, payload_json, ts)`
-
-## Setup and Run
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-npm install
-make dev
-```
-
-`make dev` launches the Electron desktop app and starts the Python backend automatically.
-
-If you only want the API server during development:
-
-```bash
-make api-dev
-```
 
 ## Packaging (Linux)
 
@@ -102,16 +134,7 @@ The `Release` workflow builds and uploads these assets to the GitHub Release:
 - `Overmind-<version>.AppImage`
 - `overmind-desktop_<version>_amd64.deb`
 
-Install examples:
-
-```bash
-chmod +x Overmind-<version>.AppImage
-./Overmind-<version>.AppImage
-```
-
-```bash
-sudo apt install ./overmind-desktop_<version>_amd64.deb
-```
+To install those artifacts, see **Install (GitHub Releases)** above.
  
 Environment variables:
 
@@ -121,18 +144,6 @@ Environment variables:
 - `OPENAI_API_KEY`: Optional; if set (and provider is `auto`/`openai`), memory embeddings are generated via OpenAI.
 - `OVERMIND_EMBEDDING_MODEL`: OpenAI embedding model name (default: `text-embedding-3-small`).
 - `OVERMIND_OPENAI_EMBEDDINGS_URL`: Optional override for the embeddings endpoint.
-
-Tests:
-
-```bash
-make test
-```
-
-Full test run:
-
-```bash
-make test-full
-```
 
 ## API Coverage
 
