@@ -99,7 +99,7 @@ class AppState:
         )
         self.model_gateway = ModelGateway(
             self.repo,
-            openai_tools_provider=self.gateway.list_openai_tools,
+            openai_tools_provider=self.gateway.list_openai_tools_with_aliases,
         )
         self.policy = policy or DeterministicPolicy(model_gateway=self.model_gateway)
         self.orchestrator = Orchestrator(

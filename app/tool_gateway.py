@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -263,15 +264,34 @@ class ToolGateway:
     def list_openai_tools(
         self, tool_names: list[str] | None = None
     ) -> list[dict[str, Any]]:
+        """Render registered tools as OpenAI function-calling definitions."""
+        tools, _ = self.list_openai_tools_with_aliases(tool_names)
+        return tools
+
+    @staticmethod
+    def _openai_safe_tool_name(tool_name: str) -> str:
+        """Return a function name compatible with OpenAI tool naming rules."""
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)
+        if not safe:
+            safe = "tool"
+        if not (safe[0].isalpha() or safe[0] in {"_", "-"}):
+            safe = f"tool_{safe}"
+        return safe[:64]
+
+    def list_openai_tools_with_aliases(
+        self, tool_names: list[str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         """Render registered tools as OpenAI function-calling definitions.
 
         Args:
             tool_names: Optional list of tool names to include.
 
         Returns:
-            List of OpenAI-compatible tool definitions.
+            OpenAI-compatible tool definitions and alias->internal-name mapping.
         """
         tools: list[dict[str, Any]] = []
+        alias_map: dict[str, str] = {}
+        used_aliases: set[str] = set()
         for spec in self.list_tool_specs(tool_names):
             if spec.json_schema is not None:
                 parameters = spec.json_schema
@@ -283,11 +303,22 @@ class ToolGateway:
                     "properties": {},
                     "additionalProperties": True,
                 }
+
+            alias_base = self._openai_safe_tool_name(spec.name)
+            alias = alias_base
+            counter = 2
+            while alias in used_aliases:
+                suffix = f"_{counter}"
+                alias = f"{alias_base[: max(1, 64 - len(suffix))]}{suffix}"
+                counter += 1
+            used_aliases.add(alias)
+            alias_map[alias] = spec.name
+
             tools.append(
                 {
                     "type": "function",
                     "function": {
-                        "name": spec.name,
+                        "name": alias,
                         "description": self._TOOL_DESCRIPTIONS.get(
                             spec.name,
                             f"Invoke tool {spec.name}",
@@ -296,7 +327,7 @@ class ToolGateway:
                     },
                 }
             )
-        return tools
+        return tools, alias_map
 
     def _args_schema_to_json_schema(
         self, args_schema: dict[str, dict[str, Any]]

@@ -28,7 +28,12 @@ class ModelGateway:
         self,
         repo: Repository,
         openai_tools_provider: (
-            Callable[[list[str]], list[dict[str, Any]]] | None
+            Callable[
+                [list[str]],
+                list[dict[str, Any]]
+                | tuple[list[dict[str, Any]], dict[str, str]],
+            ]
+            | None
         ) = None,
     ):
         """Create a model gateway.
@@ -159,7 +164,7 @@ class ModelGateway:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI tool calling")
 
-        tools = self._get_openai_tools(allowed_tools)
+        tools, alias_map = self._get_openai_tools(allowed_tools)
         if not tools:
             raise RuntimeError("No allowed tools available for OpenAI tool calling")
 
@@ -195,7 +200,8 @@ class ModelGateway:
             message = data["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
             first_call = tool_calls[0]
-            tool_name = str(first_call["function"]["name"])
+            raw_tool_name = str(first_call["function"]["name"])
+            tool_name = alias_map.get(raw_tool_name, raw_tool_name)
             args_raw = first_call["function"].get("arguments") or "{}"
             args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
@@ -207,18 +213,24 @@ class ModelGateway:
             raise RuntimeError("openai tool call arguments must be an object")
         return {"tool_name": tool_name, "args": args}
 
-    def _get_openai_tools(self, allowed_tools: list[str]) -> list[dict[str, Any]]:
+    def _get_openai_tools(
+        self, allowed_tools: list[str]
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         """Return OpenAI-compatible tool definitions for allowed tools.
 
         Args:
             allowed_tools: Allowed tool names for the current agent.
 
         Returns:
-            List of OpenAI-compatible tool definitions.
+            Tool definitions and alias->internal-name mapping.
         """
         if self.openai_tools_provider is not None:
-            return self.openai_tools_provider(allowed_tools)
-        return []
+            payload = self.openai_tools_provider(allowed_tools)
+            if isinstance(payload, tuple) and len(payload) == 2:
+                tools, aliases = payload
+                return list(tools), dict(aliases)
+            return list(payload), {}
+        return [], {}
 
     def _infer_with_model(self, *, task: str, model: str) -> dict[str, Any]:
         """Infer a tool call using model-specific logic.

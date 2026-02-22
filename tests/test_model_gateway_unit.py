@@ -156,6 +156,80 @@ def test_model_gateway_uses_openai_tool_call_when_configured(tmp_path, monkeypat
     assert rows[0]["error"] is None
 
 
+def test_model_gateway_resolves_openai_tool_aliases(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "model-openai-alias.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+
+    def fake_openai_tools_provider(
+        tool_names: list[str],
+    ) -> tuple[list[dict], dict[str, str]]:
+        assert tool_names == ["mcp.playwright.navigate"]
+        return (
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp_playwright_navigate",
+                        "description": "Navigate",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"url": {"type": "string"}},
+                            "required": ["url"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            {"mcp_playwright_navigate": "mcp.playwright.navigate"},
+        )
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            body = {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "mcp_playwright_navigate",
+                                        "arguments": json.dumps(
+                                            {"url": "https://wikipedia.org"}
+                                        ),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+            return json.dumps(body).encode("utf-8")
+
+    gateway = ModelGateway(repo, openai_tools_provider=fake_openai_tools_provider)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        model_gateway_module.urlrequest,
+        "urlopen",
+        lambda req, timeout=10: _FakeResp(),
+    )
+
+    result = gateway._infer_with_openai(
+        task="navigate",
+        model="gpt-4o-mini",
+        allowed_tools=["mcp.playwright.navigate"],
+    )
+    assert result["tool_name"] == "mcp.playwright.navigate"
+    assert result["args"] == {"url": "https://wikipedia.org"}
+
+
 def test_infer_with_model_covers_write_recall_remember_paths():
     gateway = ModelGateway(repo=None)
 
