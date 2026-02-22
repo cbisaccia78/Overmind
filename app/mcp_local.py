@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import os
+import threading
 from typing import Any
 
 from fastmcp import Client
@@ -36,6 +37,89 @@ class LocalMcpTool:
     server_id: str
     description: str
     input_schema: dict[str, Any]
+
+
+class _PersistentMcpSession:
+    """Thread-hosted persistent MCP client session."""
+
+    def __init__(self, config: LocalMcpServerConfig, timeout_s: int):
+        self.config = config
+        self.timeout_s = timeout_s
+        self.loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._closed = threading.Event()
+        self._startup_error: Exception | None = None
+        self._client: Client | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=max(1, timeout_s + 2))
+        if self._startup_error is not None:
+            raise self._startup_error
+        if not self._ready.is_set() or self._client is None:
+            raise RuntimeError("failed to start persistent MCP session")
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self._client = _build_client(self.config, timeout_s=self.timeout_s)
+        try:
+            self.loop.run_until_complete(self._client.__aenter__())
+        except Exception as exc:  # noqa: BLE001
+            self._startup_error = exc
+            self._ready.set()
+            return
+
+        self._ready.set()
+        self.loop.run_forever()
+
+        try:
+            self.loop.run_until_complete(self._client.__aexit__(None, None, None))
+        finally:
+            self.loop.close()
+            self._closed.set()
+
+    def list_tools(self, timeout_s: int) -> list[dict[str, Any]]:
+        if self._client is None:
+            raise RuntimeError("persistent session not initialized")
+
+        async def _list() -> list[dict[str, Any]]:
+            tools = await self._client.list_tools()
+            return [tool.model_dump(by_alias=True, exclude_none=True) for tool in tools]
+
+        future = asyncio.run_coroutine_threadsafe(_list(), self.loop)
+        return future.result(timeout=max(1, timeout_s + 1))
+
+    def call_tool(
+        self,
+        *,
+        remote_name: str,
+        args: dict[str, Any],
+        timeout_s: int,
+    ) -> dict[str, Any]:
+        if self._client is None:
+            raise RuntimeError("persistent session not initialized")
+
+        async def _call() -> dict[str, Any]:
+            result = await self._client.call_tool(
+                name=remote_name,
+                arguments=args,
+                timeout=timeout_s,
+                raise_on_error=False,
+            )
+            return _normalize_tool_result(result)
+
+        future = asyncio.run_coroutine_threadsafe(_call(), self.loop)
+        return future.result(timeout=max(1, timeout_s + 1))
+
+    def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._thread.join(timeout=max(1, self.timeout_s + 2))
+        self._closed.set()
+
+
+_SESSIONS_LOCK = threading.Lock()
+_SESSIONS: dict[tuple[str, str], _PersistentMcpSession] = {}
 
 
 def parse_local_mcp_servers(raw_json: str | None) -> list[LocalMcpServerConfig]:
@@ -134,17 +218,30 @@ def call_tool(
     remote_name: str,
     args: dict[str, Any],
     timeout_s: int = 20,
+    session_key: str | None = None,
 ) -> dict[str, Any]:
     """Invoke one MCP tool on a local server."""
     try:
-        result = _run_coro(
-            _call_tool_async(
-                config,
+        if session_key:
+            session = _get_or_create_session(
+                config=config,
+                session_key=session_key,
+                timeout_s=timeout_s,
+            )
+            result = session.call_tool(
                 remote_name=remote_name,
                 args=args,
                 timeout_s=timeout_s,
             )
-        )
+        else:
+            result = _run_coro(
+                _call_tool_async(
+                    config,
+                    remote_name=remote_name,
+                    args=args,
+                    timeout_s=timeout_s,
+                )
+            )
     except Exception as exc:
         return {
             "ok": False,
@@ -173,6 +270,48 @@ def call_tool(
             else {}
         ),
     }
+
+
+def close_sessions(session_key: str) -> int:
+    """Close all persistent sessions associated with one session key."""
+    keys_to_close: list[tuple[str, str]] = []
+    with _SESSIONS_LOCK:
+        for key in list(_SESSIONS.keys()):
+            if key[1] == session_key:
+                keys_to_close.append(key)
+
+    closed = 0
+    for key in keys_to_close:
+        session: _PersistentMcpSession | None = None
+        with _SESSIONS_LOCK:
+            session = _SESSIONS.pop(key, None)
+        if session is None:
+            continue
+        session.close()
+        closed += 1
+    return closed
+
+
+def _get_or_create_session(
+    *,
+    config: LocalMcpServerConfig,
+    session_key: str,
+    timeout_s: int,
+) -> _PersistentMcpSession:
+    cache_key = (config.id, session_key)
+    with _SESSIONS_LOCK:
+        session = _SESSIONS.get(cache_key)
+    if session is not None:
+        return session
+
+    created = _PersistentMcpSession(config=config, timeout_s=timeout_s)
+    with _SESSIONS_LOCK:
+        existing = _SESSIONS.get(cache_key)
+        if existing is not None:
+            created.close()
+            return existing
+        _SESSIONS[cache_key] = created
+    return created
 
 
 def _run_coro(coro: Any) -> Any:
@@ -235,6 +374,10 @@ async def _call_tool_async(
             timeout=timeout_s,
             raise_on_error=False,
         )
+    return _normalize_tool_result(result)
+
+
+def _normalize_tool_result(result: Any) -> dict[str, Any]:
     if hasattr(result, "model_dump"):
         dumped = result.model_dump(by_alias=True, exclude_none=True)
         if isinstance(dumped, dict):

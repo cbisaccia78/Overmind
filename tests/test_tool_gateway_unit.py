@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from app.mcp_local import LocalMcpTool
 from app.tool_gateway import ToolGateway
 
 
@@ -178,3 +179,119 @@ def test_list_openai_tools_renders_json_schema(tmp_path: Path):
     read_file = tools[1]
     assert read_file["function"]["name"] == "read_file"
     assert read_file["function"]["parameters"]["properties"]["path"]["type"] == "string"
+
+
+def test_mcp_dispatch_passes_run_id_as_session_key(tmp_path: Path, monkeypatch):
+    repo = MagicMock()
+    repo.get_setting.return_value = (
+        '[{"id":"browser","command":"dummy","args":[],"env":{},"enabled":true}]'
+    )
+    memory = MagicMock()
+    shell = MagicMock()
+
+    monkeypatch.setattr(
+        "app.tool_gateway.discover_local_mcp_tools",
+        lambda _cfg: [
+            LocalMcpTool(
+                local_name="mcp.browser.take_screenshot",
+                remote_name="take_screenshot",
+                server_id="browser",
+                description="take screenshot",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                },
+            )
+        ],
+    )
+
+    calls: list[dict] = []
+
+    def _fake_call_tool(*, config, remote_name, args, session_key=None, timeout_s=20):
+        calls.append(
+            {
+                "config": config,
+                "remote_name": remote_name,
+                "args": args,
+                "session_key": session_key,
+                "timeout_s": timeout_s,
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr("app.tool_gateway.call_local_mcp_tool", _fake_call_tool)
+
+    gateway = ToolGateway(
+        repo=repo,
+        memory=memory,
+        shell_runner=shell,
+        workspace_root=str(tmp_path),
+        max_file_bytes=10,
+    )
+
+    result = gateway.call(
+        run_id="run-123",
+        step_id="step-1",
+        agent={"id": "a1", "tools_allowed": ["mcp.browser.take_screenshot"]},
+        tool_name="mcp.browser.take_screenshot",
+        args={"filename": "x.png"},
+    )
+
+    assert result["ok"] is True
+    assert calls and calls[0]["session_key"] == "run-123"
+
+
+def test_mcp_dispatch_without_step_id_uses_ephemeral_session(
+    tmp_path: Path, monkeypatch
+):
+    repo = MagicMock()
+    repo.get_setting.return_value = (
+        '[{"id":"browser","command":"dummy","args":[],"env":{},"enabled":true}]'
+    )
+    memory = MagicMock()
+    shell = MagicMock()
+
+    monkeypatch.setattr(
+        "app.tool_gateway.discover_local_mcp_tools",
+        lambda _cfg: [
+            LocalMcpTool(
+                local_name="mcp.browser.snapshot",
+                remote_name="snapshot",
+                server_id="browser",
+                description="snapshot",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                },
+            )
+        ],
+    )
+
+    calls: list[dict] = []
+
+    def _fake_call_tool(*, config, remote_name, args, session_key=None, timeout_s=20):
+        calls.append({"session_key": session_key})
+        return {"ok": True}
+
+    monkeypatch.setattr("app.tool_gateway.call_local_mcp_tool", _fake_call_tool)
+
+    gateway = ToolGateway(
+        repo=repo,
+        memory=memory,
+        shell_runner=shell,
+        workspace_root=str(tmp_path),
+        max_file_bytes=10,
+    )
+
+    result = gateway.call(
+        run_id="run-adhoc",
+        step_id=None,
+        agent={"id": "a1", "tools_allowed": ["mcp.browser.snapshot"]},
+        tool_name="mcp.browser.snapshot",
+        args={},
+    )
+
+    assert result["ok"] is True
+    assert calls and calls[0]["session_key"] is None

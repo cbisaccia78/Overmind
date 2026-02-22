@@ -30,8 +30,7 @@ class ModelGateway:
         openai_tools_provider: (
             Callable[
                 [list[str]],
-                list[dict[str, Any]]
-                | tuple[list[dict[str, Any]], dict[str, str]],
+                list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, str]],
             ]
             | None
         ) = None,
@@ -67,6 +66,8 @@ class ModelGateway:
         # may still be missing it.
         model = str(agent.get("model") or "stub-v1")
         allowed_tools = [str(name) for name in (agent.get("tools_allowed") or [])]
+        if "final_answer" not in allowed_tools:
+            allowed_tools.append("final_answer")
         request_json = {
             "task": task,
             "agent_id": agent.get("id"),

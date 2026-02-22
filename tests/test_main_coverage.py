@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.main import AppState
+
 
 def test_health_and_not_found_branches(client):
     health = client.get("/health")
@@ -233,3 +235,32 @@ def test_ui_form_and_run_routes_full_branches(client):
     missing_detail = client.get("/runs/does-not-exist")
     assert missing_detail.status_code == 404
     assert "Run not found" in missing_detail.text
+
+
+def test_appstate_recovers_stale_running_runs_on_restart(tmp_path):
+    db_path = tmp_path / "recover.db"
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    first = AppState(db_path=str(db_path), workspace_root=str(workspace))
+    agent = first.repo.create_agent(
+        name="recover-agent",
+        role="ops",
+        model="stub-v1",
+        tools_allowed=["store_memory"],
+    )
+    run = first.repo.create_run(
+        agent_id=agent["id"], task="remember:notes:test", step_limit=4
+    )
+    first.repo.update_run_status(run["id"], "running")
+
+    second = AppState(db_path=str(db_path), workspace_root=str(workspace))
+    recovered = second.repo.get_run(run["id"])
+    assert recovered is not None
+    assert recovered["status"] == "failed"
+
+    events = second.repo.list_events(run["id"])
+    failed_events = [event for event in events if event.get("type") == "run.failed"]
+    assert failed_events
+    payload = failed_events[-1].get("payload_json") or {}
+    assert payload.get("error", {}).get("code") == "interrupted_restart"

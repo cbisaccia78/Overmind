@@ -15,6 +15,17 @@ def _orchestrator_with(repo: MagicMock, gateway: MagicMock, policy: MagicMock):
     )
 
 
+def _fake_png_bytes(width: int, height: int, payload: bytes) -> bytes:
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = (
+        width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    )
+    ihdr_chunk = (
+        len(ihdr_data).to_bytes(4, "big") + b"IHDR" + ihdr_data + b"\x00\x00\x00\x00"
+    )
+    return signature + ihdr_chunk + payload
+
+
 def test_orchestrator_early_exit_when_run_missing():
     repo = MagicMock()
     repo.get_run.return_value = None
@@ -178,4 +189,298 @@ def test_orchestrator_retry_then_fail_path(monkeypatch):
         "r3",
         "run.failed",
         {"run_id": "r3", "error": {"message": "fail2"}},
+    )
+
+
+def test_orchestrator_non_retryable_error_stops_early(monkeypatch):
+    monkeypatch.setattr("app.orchestrator.time.sleep", lambda *_: None)
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r4",
+            "status": "queued",
+            "agent_id": "a4",
+            "task": "t",
+            "step_limit": 5,
+        },
+        {"id": "r4", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a4",
+        "status": "active",
+        "tools_allowed": ["run_shell"],
+    }
+    repo.create_step.return_value = {"id": "s1"}
+
+    policy = MagicMock()
+    policy.plan.return_value = [PlannedAction("tool", "run_shell", {"command": "echo"})]
+
+    gateway = MagicMock()
+    gateway.call.return_value = {
+        "ok": False,
+        "error": {"code": "validation_error", "message": "bad args"},
+    }
+
+    orch = _orchestrator_with(repo, gateway, policy)
+    orch.process_run("r4")
+
+    assert gateway.call.call_count == 1
+    repo.create_event.assert_any_call(
+        "r4",
+        "tool.retry.classified",
+        {
+            "step_id": "s1",
+            "tool_name": "run_shell",
+            "attempt": 1,
+            "retryable": False,
+            "category": "permanent",
+        },
+    )
+
+
+def test_orchestrator_iterative_verify_step_succeeds(tmp_path):
+    class _IterativePolicy:
+        def __init__(self):
+            self._idx = 0
+
+        def next_action(self, *_args, **_kwargs):
+            actions = [
+                {
+                    "kind": "tool_call",
+                    "tool_name": "mcp.browser_take_screenshot",
+                    "args": {"filename": "wikipedia.png"},
+                },
+                {
+                    "kind": "verify",
+                    "checks": [
+                        {"type": "file_exists", "path": "wikipedia.png"},
+                        {
+                            "type": "file_min_bytes",
+                            "path": "wikipedia.png",
+                            "min_bytes": 8000,
+                        },
+                    ],
+                },
+                {"kind": "final_answer", "message": "done"},
+            ]
+            action = actions[self._idx]
+            self._idx += 1
+            return action
+
+    screenshot = tmp_path / "wikipedia.png"
+    screenshot.write_bytes(b"x" * 9001)
+
+    repo = MagicMock()
+    repo.get_run.return_value = {
+        "id": "r5",
+        "status": "queued",
+        "agent_id": "a5",
+        "task": "take a screenshot",
+        "step_limit": 6,
+    }
+    repo.get_agent.return_value = {
+        "id": "a5",
+        "status": "active",
+        "tools_allowed": ["mcp.browser_take_screenshot"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [
+        {"id": "s-plan"},
+        {"id": "s-tool"},
+        {"id": "s-verify"},
+        {"id": "s-eval"},
+    ]
+
+    gateway = MagicMock()
+    gateway.workspace_root = tmp_path
+    gateway.call.return_value = {"ok": True, "filename": "wikipedia.png"}
+
+    orch = _orchestrator_with(repo, gateway, _IterativePolicy())
+    orch.process_run("r5")
+
+    repo.update_run_status.assert_any_call("r5", "succeeded")
+    repo.create_event.assert_any_call(
+        "r5",
+        "run.succeeded",
+        {"run_id": "r5", "final_answer": "done"},
+    )
+
+
+def test_orchestrator_iterative_can_replan_after_first_failure():
+    class _IterativePolicy:
+        def __init__(self):
+            self._idx = 0
+            self.contexts: list[dict] = []
+
+        def next_action(self, _task, *, agent, context, history):
+            self.contexts.append(context)
+            actions = [
+                {
+                    "kind": "tool_call",
+                    "tool_name": "run_shell",
+                    "args": {"command": "bad"},
+                },
+                {"kind": "final_answer", "message": "replanned successfully"},
+            ]
+            action = actions[self._idx]
+            self._idx += 1
+            return action
+
+    repo = MagicMock()
+    repo.get_run.return_value = {
+        "id": "r6",
+        "status": "queued",
+        "agent_id": "a6",
+        "task": "do a thing",
+        "step_limit": 6,
+    }
+    repo.get_agent.return_value = {
+        "id": "a6",
+        "status": "active",
+        "tools_allowed": ["run_shell"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [
+        {"id": "s-plan"},
+        {"id": "s-tool"},
+        {"id": "s-eval"},
+    ]
+
+    gateway = MagicMock()
+    gateway.workspace_root = None
+    gateway.call.return_value = {
+        "ok": False,
+        "error": {"code": "timeout", "message": "timed out"},
+    }
+
+    policy = _IterativePolicy()
+    orch = _orchestrator_with(repo, gateway, policy)
+    orch.process_run("r6")
+
+    repo.create_event.assert_any_call(
+        "r6",
+        "tool.failed",
+        {
+            "run_id": "r6",
+            "step_id": "s-tool",
+            "tool_name": "run_shell",
+            "retryable": True,
+            "category": "transient",
+            "error": {"code": "timeout", "message": "timed out"},
+        },
+    )
+    assert policy.contexts[-1]["failure_memory"]
+    repo.update_run_status.assert_any_call("r6", "succeeded")
+
+
+def test_orchestrator_verification_rejects_low_entropy_png(tmp_path):
+    repo = MagicMock()
+    gateway = MagicMock()
+    gateway.workspace_root = tmp_path
+    orch = _orchestrator_with(repo, gateway, MagicMock())
+
+    path = tmp_path / "blankish.png"
+    path.write_bytes(_fake_png_bytes(1280, 720, b"\x00" * 9000))
+
+    result = orch._run_verification_checks(
+        [
+            {"type": "file_exists", "path": "blankish.png"},
+            {"type": "file_min_bytes", "path": "blankish.png", "min_bytes": 8000},
+            {"type": "png_signature", "path": "blankish.png"},
+            {
+                "type": "png_dimensions_min",
+                "path": "blankish.png",
+                "min_width": 600,
+                "min_height": 400,
+            },
+            {"type": "file_entropy_min", "path": "blankish.png", "min_entropy": 3.5},
+        ]
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "verification_failed"
+    assert "entropy" in result["error"]["message"]
+
+
+def test_orchestrator_verification_accepts_rich_png(tmp_path):
+    repo = MagicMock()
+    gateway = MagicMock()
+    gateway.workspace_root = tmp_path
+    orch = _orchestrator_with(repo, gateway, MagicMock())
+
+    payload = bytes(range(256)) * 40
+    path = tmp_path / "rich.png"
+    path.write_bytes(_fake_png_bytes(1280, 720, payload))
+
+    result = orch._run_verification_checks(
+        [
+            {"type": "file_exists", "path": "rich.png"},
+            {"type": "file_min_bytes", "path": "rich.png", "min_bytes": 8000},
+            {"type": "png_signature", "path": "rich.png"},
+            {
+                "type": "png_dimensions_min",
+                "path": "rich.png",
+                "min_width": 600,
+                "min_height": 400,
+            },
+            {"type": "file_entropy_min", "path": "rich.png", "min_entropy": 3.5},
+        ]
+    )
+
+    assert result["ok"] is True
+
+
+def test_orchestrator_backup_repetition_guard_pauses_run():
+    class _LoopPolicy:
+        def next_action(self, *_args, **_kwargs):
+            return {
+                "kind": "tool_call",
+                "tool_name": "mcp.playwright.browser_navigate",
+                "args": {"url": "https://en.wikipedia.org/wiki/Main_Page"},
+            }
+
+    repo = MagicMock()
+    repo.get_run.return_value = {
+        "id": "r7",
+        "status": "queued",
+        "agent_id": "a7",
+        "task": "go to wikipedia and navigate through pages and summarize each with screenshots",
+        "step_limit": 20,
+    }
+    repo.get_agent.return_value = {
+        "id": "a7",
+        "status": "active",
+        "tools_allowed": ["mcp.playwright.browser_navigate"],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [
+        {"id": "s-plan"},
+        {"id": "s1"},
+        {"id": "s2"},
+        {"id": "s3"},
+        {"id": "s4"},
+        {"id": "s5"},
+        {"id": "s6"},
+        {"id": "s-ask"},
+    ]
+
+    gateway = MagicMock()
+    gateway.call.return_value = {
+        "ok": True,
+        "url": "https://en.wikipedia.org/wiki/Main_Page",
+    }
+
+    orch = _orchestrator_with(repo, gateway, _LoopPolicy())
+    orch.process_run("r7")
+
+    repo.update_run_status.assert_any_call("r7", "awaiting_input")
+    repo.create_event.assert_any_call(
+        "r7",
+        "run.awaiting_input",
+        {
+            "run_id": "r7",
+            "step_id": "s-ask",
+            "prompt": "I am repeating the same successful action without making measurable progress. Please clarify which specific Wikipedia pages to visit next.",
+        },
     )

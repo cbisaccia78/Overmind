@@ -1,0 +1,122 @@
+{
+  "name": "overmind-agent-quality-rubric",
+  "version": "1.0.0",
+  "max_score": 20,
+  "pass_threshold": 15,
+  "hard_requirements": {
+    "browser_tasks": {
+      "postcondition_checks": 2,
+      "verification_depth": 2,
+      "retry_discipline": 2
+    }
+  },
+  "scale": {
+    "0": "missing or consistently incorrect",
+    "1": "partially implemented or inconsistent",
+    "2": "fully implemented and consistently correct"
+  },
+  "criteria": [
+    {
+      "id": "goal_specification",
+      "label": "Goal specification",
+      "weight": 1,
+      "description": "Run starts with explicit success criteria and constraints."
+    },
+    {
+      "id": "plan_quality",
+      "label": "Plan quality",
+      "weight": 1,
+      "description": "Plan is sequenced with meaningful checkpoints."
+    },
+    {
+      "id": "tool_call_correctness",
+      "label": "Tool-call correctness",
+      "weight": 1,
+      "description": "Tool selection and arguments are correct for the task."
+    },
+    {
+      "id": "postcondition_checks",
+      "label": "Postcondition checks",
+      "weight": 1,
+      "description": "Critical actions are followed by explicit verification."
+    },
+    {
+      "id": "retry_discipline",
+      "label": "Retry discipline",
+      "weight": 1,
+      "description": "Retries are capped and require diagnosis between attempts."
+    },
+    {
+      "id": "state_memory_use",
+      "label": "State/memory use",
+      "weight": 1,
+      "description": "Agent preserves intent, constraints, and prior failures."
+    },
+    {
+      "id": "verification_depth",
+      "label": "Verification depth",
+      "weight": 1,
+      "description": "Validation checks semantic outcome, not only command success."
+    },
+    {
+      "id": "error_attribution",
+      "label": "Error attribution",
+      "weight": 1,
+      "description": "Failure class and likely root cause are identified accurately."
+    },
+    {
+      "id": "completion_evidence",
+      "label": "Completion evidence",
+      "weight": 1,
+      "description": "Final output includes concrete evidence for each done criterion."
+    },
+    {
+      "id": "communication_quality",
+      "label": "Communication quality",
+      "weight": 1,
+      "description": "Progress and outcomes are concise, clear, and actionable."
+    }
+  ],
+  "score_bands": [
+    {
+      "range": "0-8",
+      "meaning": "Unreliable; high chance of loops or false success"
+    },
+    {
+      "range": "9-14",
+      "meaning": "Usable but brittle; verification/retry gaps remain"
+    },
+    {
+      "range": "15-17",
+      "meaning": "Strong; occasional edge-case misses"
+    },
+    {
+      "range": "18-20",
+      "meaning": "Production-grade for most workflows"
+    }
+  ],
+  "run_template": {
+    "run_id": "",
+    "scenario": "",
+    "timestamp_utc": "",
+    "evaluator": "",
+    "task_type": "generic",
+    "scores": {
+      "goal_specification": 0,
+      "plan_quality": 0,
+      "tool_call_correctness": 0,
+      "postcondition_checks": 0,
+      "retry_discipline": 0,
+      "state_memory_use": 0,
+      "verification_depth": 0,
+      "error_attribution": 0,
+      "completion_evidence": 0,
+      "communication_quality": 0
+    },
+    "notes": {
+      "strengths": [],
+      "failures": [],
+      "recommended_fixes": []
+    }
+  }
+}

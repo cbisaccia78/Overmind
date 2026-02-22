@@ -84,6 +84,7 @@ class AppState:
         workspace = str(Path(workspace_root or WORKSPACE_ROOT).resolve())
 
         self.repo = Repository(db_path)
+        self._recover_interrupted_runs()
 
         stored_openai_key = self.repo.get_setting("openai_api_key")
         if stored_openai_key and not os.getenv("OPENAI_API_KEY"):
@@ -107,6 +108,27 @@ class AppState:
             tool_gateway=self.gateway,
             policy=self.policy,
         )
+
+    def _recover_interrupted_runs(self) -> None:
+        """Mark stale in-progress runs as failed after process restart."""
+        for run in self.repo.list_runs():
+            if run.get("status") != "running":
+                continue
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            self.repo.update_run_status(run_id, "failed")
+            self.repo.create_event(
+                run_id,
+                "run.failed",
+                {
+                    "run_id": run_id,
+                    "error": {
+                        "code": "interrupted_restart",
+                        "message": "run was in progress when the app restarted",
+                    },
+                },
+            )
 
 
 def create_app(

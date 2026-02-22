@@ -80,7 +80,7 @@ def test_model_gateway_uses_openai_tool_call_when_configured(tmp_path, monkeypat
     repo = Repository(db_path)
 
     def fake_openai_tools_provider(tool_names: list[str]) -> list[dict]:
-        assert tool_names == ["read_file"]
+        assert tool_names == ["read_file", "final_answer"]
         return [
             {
                 "type": "function",

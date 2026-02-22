@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import threading
 import time
+import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .policy import Policy
@@ -77,10 +79,15 @@ class Orchestrator:
         Returns:
             None.
         """
-        if callable(getattr(type(self.policy), "next_action", None)):
-            self._process_run_iterative(run_id)
-            return
-        self._process_run_legacy(run_id)
+        try:
+            if callable(getattr(type(self.policy), "next_action", None)):
+                self._process_run_iterative(run_id)
+                return
+            self._process_run_legacy(run_id)
+        finally:
+            releaser = getattr(self.tool_gateway, "release_run_resources", None)
+            if callable(releaser):
+                releaser(run_id)
 
     def _process_run_iterative(self, run_id: str) -> None:
         """Process a run via iterative next-action planning."""
@@ -102,6 +109,7 @@ class Orchestrator:
             return
 
         step_limit = int(run["step_limit"])
+        planning_contract = self._build_planning_contract(str(run.get("task") or ""))
         self.repo.update_run_status(run_id, "running")
         if not run.get("started_at"):
             self.repo.create_event(
@@ -121,6 +129,7 @@ class Orchestrator:
             )
 
         idx = len(existing_steps)
+        consecutive_failures = 0
         if idx == 0:
             step = self.repo.create_step(
                 run_id=run_id,
@@ -163,6 +172,11 @@ class Orchestrator:
                     "run_id": run_id,
                     "step_limit": step_limit,
                     "history": history,
+                    "failure_memory": self._build_failure_memory(history),
+                    "planning_contract": planning_contract,
+                    "progress_state": self._build_progress_state(
+                        history, planning_contract
+                    ),
                 },
                 history=history,
             )
@@ -185,6 +199,7 @@ class Orchestrator:
                     args=args,
                 )
                 if result.get("ok"):
+                    consecutive_failures = 0
                     self.repo.finish_step(step["id"], output_json=result)
                     self.repo.create_event(
                         run_id,
@@ -200,22 +215,71 @@ class Orchestrator:
                         }
                     )
                     idx += 1
+                    progress_state = self._build_progress_state(
+                        history, planning_contract
+                    )
+                    if self._should_pause_for_repetition(
+                        planning_contract=planning_contract,
+                        progress_state=progress_state,
+                    ):
+                        self._pause_for_user(
+                            run_id=run_id,
+                            idx=idx,
+                            prompt=(
+                                "I am repeating the same successful action without "
+                                "making measurable progress. Please clarify which "
+                                "specific Wikipedia pages to visit next."
+                            ),
+                        )
+                        return
                     continue
 
                 message = result.get("error", {}).get("message", "tool failed")
+                retryable, category = self._classify_retry(result.get("error"))
                 self.repo.finish_step(step["id"], output_json=result, error=message)
                 self.repo.create_event(
                     run_id,
                     "step.finished",
                     {"step_id": step["id"], "idx": idx, "ok": False},
                 )
-                self.repo.update_run_status(run_id, "failed")
                 self.repo.create_event(
                     run_id,
-                    "run.failed",
-                    {"run_id": run_id, "error": result.get("error")},
+                    "tool.failed",
+                    {
+                        "run_id": run_id,
+                        "step_id": step["id"],
+                        "tool_name": tool_name,
+                        "retryable": retryable,
+                        "category": category,
+                        "error": result.get("error"),
+                    },
                 )
-                return
+                history.append(
+                    {
+                        "step_type": "tool",
+                        "input": {"tool_name": tool_name, "args": args},
+                        "output": result,
+                        "error": message,
+                    }
+                )
+                consecutive_failures += 1
+                idx += 1
+                if consecutive_failures >= 2:
+                    self.repo.update_run_status(run_id, "failed")
+                    self.repo.create_event(
+                        run_id,
+                        "run.failed",
+                        {
+                            "run_id": run_id,
+                            "error": {
+                                "code": "failure_budget_exhausted",
+                                "message": "too many consecutive failed actions",
+                                "last_error": result.get("error"),
+                            },
+                        },
+                    )
+                    return
+                continue
 
             if kind == "ask_user":
                 prompt = str(action.get("message") or "Additional input is required.")
@@ -258,6 +322,67 @@ class Orchestrator:
                 )
                 return
 
+            if kind == "verify":
+                checks = list(action.get("checks") or [])
+                step = self.repo.create_step(
+                    run_id=run_id,
+                    idx=idx,
+                    step_type="verify",
+                    input_json={"checks": checks},
+                )
+                verification = self._run_verification_checks(checks)
+                if verification.get("ok"):
+                    self.repo.finish_step(step["id"], output_json=verification)
+                    self.repo.create_event(
+                        run_id,
+                        "step.finished",
+                        {"step_id": step["id"], "idx": idx, "ok": True},
+                    )
+                    history.append(
+                        {
+                            "step_type": "verify",
+                            "input": {"checks": checks},
+                            "output": verification,
+                            "error": None,
+                        }
+                    )
+                    idx += 1
+                    continue
+
+                message = verification.get("error", {}).get(
+                    "message", "verification failed"
+                )
+                self.repo.finish_step(
+                    step["id"], output_json=verification, error=message
+                )
+                self.repo.create_event(
+                    run_id,
+                    "step.finished",
+                    {"step_id": step["id"], "idx": idx, "ok": False},
+                )
+                prompt = str(action.get("on_fail_prompt") or "")
+                if prompt:
+                    self.repo.create_event(
+                        run_id,
+                        "run.awaiting_input",
+                        {
+                            "run_id": run_id,
+                            "step_id": step["id"],
+                            "prompt": prompt,
+                            "verification_error": verification.get("error"),
+                        },
+                    )
+                    self.repo.update_run_status(run_id, "awaiting_input")
+                    return
+
+                self.repo.update_run_status(run_id, "failed")
+                self.repo.create_event(
+                    run_id,
+                    "run.failed",
+                    {"run_id": run_id, "error": verification.get("error")},
+                )
+                return
+
             self.repo.update_run_status(run_id, "failed")
             self.repo.create_event(
                 run_id,
@@ -276,6 +401,120 @@ class Orchestrator:
             run_id, "run.step_limit_reached", {"step_limit": step_limit}
         )
         self.repo.update_run_status(run_id, "failed")
+
+    def _pause_for_user(self, *, run_id: str, idx: int, prompt: str) -> None:
+        """Pause a run and request user input with a persisted ask-user step."""
+        step = self.repo.create_step(
+            run_id=run_id,
+            idx=idx,
+            step_type="ask_user",
+            input_json={"prompt": prompt},
+        )
+        output = {"ok": True, "status": "awaiting_input", "prompt": prompt}
+        self.repo.finish_step(step["id"], output_json=output)
+        self.repo.create_event(
+            run_id,
+            "run.awaiting_input",
+            {"run_id": run_id, "step_id": step["id"], "prompt": prompt},
+        )
+        self.repo.update_run_status(run_id, "awaiting_input")
+
+    @staticmethod
+    def _build_planning_contract(task: str) -> dict[str, Any]:
+        """Build a lightweight task contract for multi-page browsing workflows."""
+        lowered = (task or "").lower()
+        is_browser_research = all(
+            token in lowered
+            for token in ["wikipedia", "navigate", "screenshot", "summar"]
+        )
+        if not is_browser_research:
+            return {"mode": "generic"}
+        return {
+            "mode": "multi_page_research",
+            "domain": "wikipedia.org",
+            "min_unique_pages": 3,
+            "require_screenshot_per_page": True,
+            "require_summary_per_page": True,
+        }
+
+    def _build_progress_state(
+        self,
+        history: list[dict[str, Any]],
+        planning_contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Summarize current progress for planning decisions."""
+        visited_urls: list[str] = []
+        screenshot_count = 0
+        summary_count = 0
+        successful_tool_signatures: list[str] = []
+
+        for item in history:
+            if item.get("step_type") != "tool":
+                continue
+            output = dict(item.get("output") or {})
+            if not output.get("ok"):
+                continue
+            tool_input = dict(item.get("input") or {})
+            tool_name = str(tool_input.get("tool_name") or "")
+            args = dict(tool_input.get("args") or {})
+            successful_tool_signatures.append(
+                self._tool_signature(tool_name=tool_name, args=args)
+            )
+
+            if tool_name.endswith("browser_navigate"):
+                url = str(args.get("url") or "").strip()
+                if url:
+                    visited_urls.append(url)
+            if "screenshot" in tool_name:
+                screenshot_count += 1
+            if tool_name == "store_memory":
+                metadata = dict(args.get("metadata") or {})
+                source = str(metadata.get("source") or "")
+                if source in {"analysis", "summary"}:
+                    summary_count += 1
+
+        unique_urls = sorted(set(visited_urls))
+        min_unique = int(planning_contract.get("min_unique_pages") or 0)
+        unique_pages_done = len(unique_urls)
+        consecutive_same_success = 0
+        if successful_tool_signatures:
+            last = successful_tool_signatures[-1]
+            for signature in reversed(successful_tool_signatures):
+                if signature != last:
+                    break
+                consecutive_same_success += 1
+
+        return {
+            "unique_urls": unique_urls,
+            "unique_pages_done": unique_pages_done,
+            "screenshot_count": screenshot_count,
+            "summary_count": summary_count,
+            "min_unique_pages": min_unique,
+            "consecutive_same_success": consecutive_same_success,
+            "contract_satisfied": (
+                unique_pages_done >= min_unique
+                and screenshot_count >= max(min_unique, 1)
+                and summary_count >= max(min_unique, 1)
+                if planning_contract.get("mode") == "multi_page_research"
+                else False
+            ),
+        }
+
+    @staticmethod
+    def _tool_signature(*, tool_name: str, args: dict[str, Any]) -> str:
+        """Create a stable signature for repeated-action detection."""
+        return f"{tool_name}|{repr(sorted(args.items()))}"
+
+    @staticmethod
+    def _should_pause_for_repetition(
+        *, planning_contract: dict[str, Any], progress_state: dict[str, Any]
+    ) -> bool:
+        """Backup guard: pause only in strict repetitive loops with no progress."""
+        if planning_contract.get("mode") != "multi_page_research":
+            return False
+        if bool(progress_state.get("contract_satisfied")):
+            return False
+        return int(progress_state.get("consecutive_same_success") or 0) >= 6
 
     def _execute_tool_with_retries(
         self,
@@ -311,9 +550,279 @@ class Orchestrator:
                     "error": result.get("error"),
                 },
             )
+            retryable, category = self._classify_retry(result.get("error"))
+            self.repo.create_event(
+                run_id,
+                "tool.retry.classified",
+                {
+                    "step_id": step_id,
+                    "tool_name": tool_name,
+                    "attempt": attempt,
+                    "retryable": retryable,
+                    "category": category,
+                },
+            )
+            if not retryable:
+                return result
             if attempt < self.retry_config.max_attempts:
                 time.sleep(self.retry_config.backoff_seconds)
         return result
+
+    @staticmethod
+    def _classify_retry(error: dict[str, Any] | None) -> tuple[bool, str]:
+        """Classify tool failures into retryable vs non-retryable buckets."""
+        payload = error or {}
+        code = str(payload.get("code") or "").lower()
+        message = str(payload.get("message") or "").lower()
+
+        transient_codes = {
+            "timeout",
+            "temporarily_unavailable",
+            "rate_limited",
+            "network_error",
+        }
+        permanent_codes = {
+            "validation_error",
+            "tool_not_allowed",
+            "tool_not_found",
+            "file_not_found",
+            "permission_denied",
+            "invalid_path",
+            "invalid_arguments",
+        }
+        if code in transient_codes:
+            return True, "transient"
+        if code in permanent_codes:
+            return False, "permanent"
+        if any(token in message for token in ["timeout", "temporar", "rate limit"]):
+            return True, "transient"
+        if any(
+            token in message
+            for token in [
+                "not allowed",
+                "not found",
+                "invalid",
+                "permission",
+                "schema",
+                "argument",
+            ]
+        ):
+            return False, "permanent"
+        return True, "unknown"
+
+    def _run_verification_checks(self, checks: list[dict[str, Any]]) -> dict[str, Any]:
+        """Evaluate postcondition checks for artifacts via typed handlers."""
+        handlers = self._verification_handlers()
+        results: list[dict[str, Any]] = []
+        for check in checks:
+            check_type = str(check.get("type") or "")
+            handler = handlers.get(check_type)
+            if handler is None:
+                return {
+                    "ok": False,
+                    "checks": results,
+                    "error": {
+                        "code": "verification_failed",
+                        "message": f"unsupported verification check: {check_type}",
+                    },
+                }
+
+            result = handler(check)
+            results.append(result)
+            if result.get("ok"):
+                continue
+            return {
+                "ok": False,
+                "checks": results,
+                "error": {
+                    "code": "verification_failed",
+                    "message": str(
+                        result.get("error_message")
+                        or f"verification check failed: {check_type}"
+                    ),
+                },
+            }
+
+        return {"ok": True, "checks": results}
+
+    def _verification_handlers(self) -> dict[str, Any]:
+        """Return verification handlers keyed by check type."""
+        return {
+            "file_exists": self._check_file_exists,
+            "file_min_bytes": self._check_file_min_bytes,
+            "png_signature": self._check_png_signature,
+            "png_dimensions_min": self._check_png_dimensions_min,
+            "file_entropy_min": self._check_file_entropy_min,
+        }
+
+    def _check_file_exists(self, check: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(check.get("path") or "")
+        path = self._resolve_check_path(raw_path)
+        ok = path is not None and path.exists() and path.is_file()
+        result = {"type": "file_exists", "path": raw_path, "ok": ok}
+        if ok:
+            return result
+        result["error_message"] = f"expected file does not exist: {raw_path}"
+        return result
+
+    def _check_file_min_bytes(self, check: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(check.get("path") or "")
+        path = self._resolve_check_path(raw_path)
+        minimum = int(check.get("min_bytes") or 1)
+        size = path.stat().st_size if path and path.exists() and path.is_file() else 0
+        ok = size >= minimum
+        result = {
+            "type": "file_min_bytes",
+            "path": raw_path,
+            "min_bytes": minimum,
+            "actual_bytes": size,
+            "ok": ok,
+        }
+        if ok:
+            return result
+        result["error_message"] = f"file smaller than expected: {raw_path}"
+        return result
+
+    def _check_png_signature(self, check: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(check.get("path") or "")
+        path = self._resolve_check_path(raw_path)
+        signature = b"\x89PNG\r\n\x1a\n"
+        data = b""
+        if path and path.exists() and path.is_file():
+            data = path.read_bytes()
+        ok = len(data) >= 8 and data[:8] == signature
+        result = {
+            "type": "png_signature",
+            "path": raw_path,
+            "ok": ok,
+        }
+        if ok:
+            return result
+        result["error_message"] = f"file is not a valid PNG signature: {raw_path}"
+        return result
+
+    def _check_png_dimensions_min(self, check: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(check.get("path") or "")
+        path = self._resolve_check_path(raw_path)
+        min_width = int(check.get("min_width") or 1)
+        min_height = int(check.get("min_height") or 1)
+        width = 0
+        height = 0
+        if path and path.exists() and path.is_file():
+            width, height = self._read_png_dimensions(path)
+        ok = width >= min_width and height >= min_height
+        result = {
+            "type": "png_dimensions_min",
+            "path": raw_path,
+            "min_width": min_width,
+            "min_height": min_height,
+            "actual_width": width,
+            "actual_height": height,
+            "ok": ok,
+        }
+        if ok:
+            return result
+        result["error_message"] = (
+            f"PNG dimensions below minimum for {raw_path}: "
+            f"{width}x{height} < {min_width}x{min_height}"
+        )
+        return result
+
+    def _check_file_entropy_min(self, check: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(check.get("path") or "")
+        path = self._resolve_check_path(raw_path)
+        min_entropy = float(check.get("min_entropy") or 1.0)
+        data = b""
+        if path and path.exists() and path.is_file():
+            data = path.read_bytes()
+        entropy = self._byte_entropy(data)
+        ok = entropy >= min_entropy
+        result = {
+            "type": "file_entropy_min",
+            "path": raw_path,
+            "min_entropy": min_entropy,
+            "actual_entropy": round(entropy, 3),
+            "ok": ok,
+        }
+        if ok:
+            return result
+        result["error_message"] = (
+            f"file entropy below threshold for {raw_path}: "
+            f"{entropy:.3f} < {min_entropy:.3f}"
+        )
+        return result
+
+    @staticmethod
+    def _read_png_dimensions(path: Path) -> tuple[int, int]:
+        """Read PNG dimensions from IHDR if present; return (0, 0) on failure."""
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return 0, 0
+        if len(data) < 24:
+            return 0, 0
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return 0, 0
+        if data[12:16] != b"IHDR":
+            return 0, 0
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+        return width, height
+
+    @staticmethod
+    def _byte_entropy(data: bytes) -> float:
+        """Compute Shannon entropy in bits/byte for file bytes."""
+        if not data:
+            return 0.0
+        counts = [0] * 256
+        for value in data:
+            counts[value] += 1
+        total = float(len(data))
+        entropy = 0.0
+        for count in counts:
+            if count == 0:
+                continue
+            probability = count / total
+            entropy -= probability * math.log2(probability)
+        return entropy
+
+    @staticmethod
+    def _build_failure_memory(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Build compact failure memory from prior tool outputs."""
+        failures: list[dict[str, Any]] = []
+        for item in history:
+            if item.get("step_type") != "tool":
+                continue
+            output = dict(item.get("output") or {})
+            if output.get("ok", True):
+                continue
+            tool_input = dict(item.get("input") or {})
+            failures.append(
+                {
+                    "tool_name": str(tool_input.get("tool_name") or ""),
+                    "args": dict(tool_input.get("args") or {}),
+                    "error": output.get("error") or item.get("error"),
+                }
+            )
+        return failures[-5:]
+
+    def _resolve_check_path(self, raw_path: str) -> Path | None:
+        """Resolve verification paths relative to workspace root."""
+        candidate = Path(raw_path.strip())
+        if not raw_path.strip():
+            return None
+        if not candidate.is_absolute():
+            candidate = self.tool_gateway.workspace_root / candidate
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError):
+            return None
+        if (
+            self.tool_gateway.workspace_root not in resolved.parents
+            and resolved != self.tool_gateway.workspace_root
+        ):
+            return None
+        return resolved
 
     def _process_run_legacy(self, run_id: str) -> None:
         """Process a run using the legacy fixed plan->tool->eval flow."""

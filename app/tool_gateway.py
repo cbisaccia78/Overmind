@@ -17,6 +17,7 @@ from typing import Any, Callable
 from .mcp_local import (
     LocalMcpServerConfig,
     call_tool as call_local_mcp_tool,
+    close_sessions as close_local_mcp_sessions,
     discover_tools as discover_local_mcp_tools,
     parse_local_mcp_servers,
 )
@@ -31,13 +32,15 @@ class ToolSpec:
 
     name: str
     args_schema: dict[str, dict[str, Any]] | None
-    handler: Callable[[dict[str, Any]], dict[str, Any]]
+    handler: Callable[..., dict[str, Any]]
     json_schema: dict[str, Any] | None = None
     validate_args: bool = True
 
 
 class ToolGateway:
     """Authorize and dispatch tool calls, then persist audit records."""
+
+    _INTERNAL_TOOL_NAMES = frozenset({"final_answer"})
 
     _TOOL_DESCRIPTIONS: dict[str, str] = {
         "run_shell": "Run a shell command on the host OS within the workspace.",
@@ -196,12 +199,13 @@ class ToolGateway:
         *,
         config: LocalMcpServerConfig,
         remote_tool_name: str,
-    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-        def _handler(args: dict[str, Any]) -> dict[str, Any]:
+    ) -> Callable[..., dict[str, Any]]:
+        def _handler(args: dict[str, Any], run_id: str | None = None) -> dict[str, Any]:
             return call_local_mcp_tool(
                 config=config,
                 remote_name=remote_tool_name,
                 args=args,
+                session_key=run_id,
             )
 
         return _handler
@@ -243,8 +247,16 @@ class ToolGateway:
         return True
 
     def list_tool_names(self) -> list[str]:
-        """Return all currently registered tool names."""
-        return list(self._tool_registry.keys())
+        """Return currently user-selectable tool names.
+
+        Internal control-flow tools are intentionally hidden from agent
+        registration/picker surfaces.
+        """
+        return [
+            name
+            for name in self._tool_registry.keys()
+            if name not in self._INTERNAL_TOOL_NAMES
+        ]
 
     def list_tool_specs(self, tool_names: list[str] | None = None) -> list[ToolSpec]:
         """List registered tool specs, optionally filtered by name.
@@ -432,7 +444,9 @@ class ToolGateway:
         Returns:
             Tool result dict. Always includes `ok`.
         """
-        allowed_tools = set(agent.get("tools_allowed") or [])
+        allowed_tools = (
+            set(agent.get("tools_allowed") or []) | self._INTERNAL_TOOL_NAMES
+        )
         start = time.monotonic()
         if tool_name not in allowed_tools or tool_name not in self._tool_registry:
             if tool_name not in self._tool_registry:
@@ -455,8 +469,14 @@ class ToolGateway:
             )
             return result
 
+        mcp_session_key = run_id if step_id is not None else None
         try:
-            result = self._dispatch(tool_name, args)
+            result = self._dispatch(
+                tool_name,
+                args,
+                run_id=run_id,
+                mcp_session_key=mcp_session_key,
+            )
         except Exception as exc:  # noqa: BLE001
             result = {
                 "ok": False,
@@ -482,7 +502,18 @@ class ToolGateway:
         )
         return result
 
-    def _dispatch(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def release_run_resources(self, run_id: str) -> None:
+        """Release cached resources held by tools for a completed run."""
+        close_local_mcp_sessions(run_id)
+
+    def _dispatch(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        run_id: str | None = None,
+        mcp_session_key: str | None = None,
+    ) -> dict[str, Any]:
         """Dispatch the tool implementation for a supported tool name.
 
         Args:
@@ -509,8 +540,12 @@ class ToolGateway:
             validated = self._validate_args(spec, args)
             if isinstance(validated, dict) and validated.get("ok") is False:
                 return validated
+            if tool_name.startswith("mcp."):
+                return spec.handler(validated, run_id=mcp_session_key)
             return spec.handler(validated)
 
+        if tool_name.startswith("mcp."):
+            return spec.handler(args, run_id=mcp_session_key)
         return spec.handler(args)
 
     def _validate_args(self, spec: ToolSpec, args: dict[str, Any]) -> dict[str, Any]:

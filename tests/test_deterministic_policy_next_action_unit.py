@@ -96,6 +96,64 @@ def test_next_action_tool_failure_and_final_answer_passthrough():
     assert done_action == {"kind": "final_answer", "message": "all done"}
 
 
+def test_next_action_openai_failure_replans_with_memory(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {"ok": True, "tool_name": "read_file", "args": {"path": "README.md"}},
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "complete the task",
+        agent={"tools_allowed": ["run_shell", "read_file"]},
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "run_shell", "args": {"command": "bad"}},
+                "output": {"ok": False, "error": {"message": "timeout"}},
+            }
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "read_file",
+        "args": {"path": "README.md"},
+    }
+    assert "Prior failures" in gateway.calls[0]["task"]
+
+
+def test_next_action_openai_failure_repeated_candidate_asks_user(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {"ok": True, "tool_name": "run_shell", "args": {"command": "bad"}},
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "complete the task",
+        agent={"tools_allowed": ["run_shell", "read_file"]},
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "run_shell", "args": {"command": "bad"}},
+                "output": {"ok": False, "error": {"message": "timeout"}},
+            }
+        ],
+    )
+
+    assert action == {
+        "kind": "ask_user",
+        "message": "The next planned action repeats a previously failed tool call. Please provide additional guidance.",
+    }
+
+
 def test_next_action_non_openai_summarizes_last_output(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     policy = DeterministicPolicy(model_gateway=_QueueGateway([]))
@@ -217,6 +275,47 @@ def test_next_action_openai_followup_infer_paths(monkeypatch):
     assert "Last tool result summary" in gateway.calls[0]["task"]
 
 
+def test_next_action_emits_verify_for_screenshot_artifacts(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    policy = DeterministicPolicy(model_gateway=_QueueGateway([]))
+
+    action = policy.next_action(
+        "open wikipedia and take a screenshot",
+        agent={"tools_allowed": ["mcp.browser_take_screenshot"]},
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.browser_take_screenshot"},
+                "output": {"ok": True, "filename": "wikipedia.png"},
+            }
+        ],
+    )
+
+    assert action["kind"] == "verify"
+    assert action["checks"][0] == {"type": "file_exists", "path": "wikipedia.png"}
+    assert action["checks"][1] == {
+        "type": "file_min_bytes",
+        "path": "wikipedia.png",
+        "min_bytes": 8000,
+    }
+    assert action["checks"][2] == {
+        "type": "png_signature",
+        "path": "wikipedia.png",
+    }
+    assert action["checks"][3] == {
+        "type": "png_dimensions_min",
+        "path": "wikipedia.png",
+        "min_width": 600,
+        "min_height": 400,
+    }
+    assert action["checks"][4] == {
+        "type": "file_entropy_min",
+        "path": "wikipedia.png",
+        "min_entropy": 3.5,
+    }
+
+
 def test_policy_helpers_extract_url_and_truncate_summary():
     assert DeterministicPolicy._extract_url("visit https://example.com/path now") == (
         "https://example.com/path"
@@ -230,3 +329,86 @@ def test_policy_helpers_extract_url_and_truncate_summary():
     assert "exit_code=0" in summary
     assert summary.endswith("...")
     assert len(summary) < 900
+
+
+def test_next_action_uses_contract_prompt_for_wikipedia_research(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_navigate",
+                "args": {"url": "https://en.wikipedia.org/wiki/Astronomy"},
+            }
+        ]
+    )
+    policy = DeterministicPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "go to wikipedia and navigate pages, summarize each, and take screenshots",
+        agent={"tools_allowed": ["mcp.playwright.browser_navigate", "final_answer"]},
+        context={
+            "run_id": "r1",
+            "planning_contract": {
+                "mode": "multi_page_research",
+                "domain": "wikipedia.org",
+                "min_unique_pages": 3,
+                "require_screenshot_per_page": True,
+                "require_summary_per_page": True,
+            },
+            "progress_state": {
+                "unique_urls": [],
+                "unique_pages_done": 0,
+                "screenshot_count": 0,
+                "summary_count": 0,
+                "consecutive_same_success": 0,
+                "contract_satisfied": False,
+            },
+        },
+        history=[],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_navigate",
+        "args": {"url": "https://en.wikipedia.org/wiki/Astronomy"},
+    }
+    assert "Planning contract" in gateway.calls[0]["task"]
+    assert "Current progress" in gateway.calls[0]["task"]
+
+
+def test_next_action_contract_completion_returns_final_answer(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    policy = DeterministicPolicy(model_gateway=_QueueGateway([]))
+
+    action = policy.next_action(
+        "go to wikipedia and navigate pages, summarize each, and take screenshots",
+        agent={"tools_allowed": ["mcp.playwright.browser_navigate", "final_answer"]},
+        context={
+            "run_id": "r1",
+            "planning_contract": {
+                "mode": "multi_page_research",
+                "min_unique_pages": 3,
+            },
+            "progress_state": {
+                "unique_pages_done": 3,
+                "screenshot_count": 3,
+                "summary_count": 3,
+                "consecutive_same_success": 0,
+                "contract_satisfied": True,
+            },
+        },
+        history=[
+            {
+                "step_type": "tool",
+                "input": {
+                    "tool_name": "mcp.playwright.browser_take_screenshot",
+                    "args": {"filename": "a.png"},
+                },
+                "output": {"ok": True, "filename": "a.png"},
+            }
+        ],
+    )
+
+    assert action["kind"] == "final_answer"
+    assert "Completed the browsing contract" in action["message"]

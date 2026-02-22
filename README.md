@@ -69,6 +69,12 @@ Full test run:
 make test-full
 ```
 
+## Agent Evaluation
+
+Use these templates to benchmark reasoning and execution quality across runs:
+- JSON rubric + machine-readable run template: [tools/agent_eval_rubric.json](tools/agent_eval_rubric.json)
+- Human review scorecard: [docs/agent-evaluation-scorecard.md](docs/agent-evaluation-scorecard.md)
+
 ## Architecture
 
 Electron desktop shell + single-process Python FastAPI backend:
