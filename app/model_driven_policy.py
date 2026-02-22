@@ -119,6 +119,7 @@ class ModelDrivenPolicy(Policy):
                     last_args=last_args,
                     error_message=error_message,
                     failure_memory=self._collect_failure_memory(history),
+                    history=history,
                 )
                 return self._infer_next_action(
                     prompt=prompt,
@@ -199,17 +200,23 @@ class ModelDrivenPolicy(Policy):
         *, task: str, history: list[dict[str, Any]] | None = None
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
-        recent = ModelDrivenPolicy._render_recent_history(history or [])
+        history_items = history or []
+        state_block = ModelDrivenPolicy._render_state_and_progress(
+            task=task, history=history_items
+        )
+        recent = ModelDrivenPolicy._render_recent_history(history_items)
         contract = ModelDrivenPolicy._decision_contract()
         if recent:
             return (
                 f"{task_block}\n\n"
+                f"{state_block}\n\n"
                 "Recent run history:\n"
                 f"{recent}\n\n"
                 f"{contract}"
             )
         return (
             f"{task_block}\n\n"
+            f"{state_block}\n\n"
             f"{contract}"
         )
 
@@ -222,10 +229,14 @@ class ModelDrivenPolicy(Policy):
         history: list[dict[str, Any]],
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
+        state_block = ModelDrivenPolicy._render_state_and_progress(
+            task=task, history=history
+        )
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
         return (
             f"{task_block}\n\n"
+            f"{state_block}\n\n"
             f"Last tool: {last_tool_name or 'none'}\n"
             "Last tool result summary:\n"
             f"{last_tool_summary or 'none'}\n\n"
@@ -246,11 +257,15 @@ class ModelDrivenPolicy(Policy):
         history: list[dict[str, Any]],
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
+        state_block = ModelDrivenPolicy._render_state_and_progress(
+            task=task, history=history
+        )
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
         blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
         return (
             f"{task_block}\n\n"
+            f"{state_block}\n\n"
             "Stall detected:\n"
             f"- Pattern observed across the last {repeats} successful tool actions.\n"
             f"- Pattern summary: {pattern_summary or 'repeated low-progress actions'}\n\n"
@@ -274,6 +289,9 @@ class ModelDrivenPolicy(Policy):
         history: list[dict[str, Any]],
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
+        state_block = ModelDrivenPolicy._render_state_and_progress(
+            task=task, history=history
+        )
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
         attempted_kind = str(attempted_action.get("kind") or "")
@@ -284,6 +302,7 @@ class ModelDrivenPolicy(Policy):
         blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
         return (
             f"{task_block}\n\n"
+            f"{state_block}\n\n"
             "Stall recovery violation:\n"
             "Your previous choice violated the stall recovery constraint.\n"
             f"Attempted action: kind={attempted_kind} tool={attempted_tool} args={attempted_args or '{}'}\n\n"
@@ -338,39 +357,51 @@ class ModelDrivenPolicy(Policy):
         stderr = str(output.get("stderr") or "").strip()
         exit_code = output.get("exit_code")
         body = stdout if stdout else stderr
-        if not body:
-            body = ModelDrivenPolicy._extract_mcp_text(output)
-        if not body:
-            observation = output.get("observation")
-            if isinstance(observation, dict):
-                body = str(observation.get("text") or "").strip()
+        observation = output.get("observation")
+        if not body and isinstance(observation, dict):
+            body = ModelDrivenPolicy._summarize_observation(observation)
+        if not body and isinstance(output.get("mcp"), dict):
+            body = ModelDrivenPolicy._summarize_mcp_payload(output)
         if len(body) > 800:
             body = body[:800] + "..."
         return f"Tool completed with exit_code={exit_code}.\n\n{body}".strip()
 
     @staticmethod
-    def _extract_mcp_text(output: dict[str, Any]) -> str:
+    def _summarize_observation(observation: dict[str, Any]) -> str:
+        summary = str(observation.get("summary") or "").strip()
+        if summary:
+            return summary
+
+        text = str(observation.get("text") or "").strip()
+        if text:
+            return text
+
+        page_url = str(observation.get("page_url") or "").strip()
+        page_title = str(observation.get("page_title") or "").strip()
+        if page_title and page_url:
+            return f"Observed page: {page_title} ({page_url})"
+        if page_title or page_url:
+            return f"Observed page: {page_title or page_url}"
+        return "Structured observation captured."
+
+    @staticmethod
+    def _summarize_mcp_payload(output: dict[str, Any]) -> str:
         mcp_payload = output.get("mcp")
         if not isinstance(mcp_payload, dict):
-            return ""
+            return "MCP tool call completed."
+        tool_name = str(mcp_payload.get("tool_name") or "unknown")
         result = mcp_payload.get("result")
-        if not isinstance(result, dict):
-            return ""
-        content = result.get("content")
-        if not isinstance(content, list):
-            return ""
-        texts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                text = item.strip()
-                if text:
-                    texts.append(text)
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
-                if text:
-                    texts.append(text)
-        return "\n".join(texts).strip()
+        content_count = 0
+        if isinstance(result, dict):
+            content = result.get("content")
+            if isinstance(content, list):
+                content_count = len(content)
+        if content_count > 0:
+            return (
+                f"MCP tool `{tool_name}` completed with "
+                f"{content_count} content item(s)."
+            )
+        return f"MCP tool `{tool_name}` completed."
 
     @staticmethod
     def _collect_failure_memory(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -452,11 +483,16 @@ class ModelDrivenPolicy(Policy):
         last_args: dict[str, Any],
         error_message: str,
         failure_memory: list[dict[str, Any]],
+        history: list[dict[str, Any]],
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
+        state_block = ModelDrivenPolicy._render_state_and_progress(
+            task=task, history=history
+        )
         contract = ModelDrivenPolicy._decision_contract()
         return (
             f"{task_block}\n\n"
+            f"{state_block}\n\n"
             "Prior failures:\n"
             f"{failure_memory}\n\n"
             "Most recent failure:\n"
@@ -509,6 +545,80 @@ class ModelDrivenPolicy(Policy):
             sections.append(f"Prior user inputs:\n{bullets}")
         sections.append(f"Latest user input (highest priority):\n{latest_input}")
         return "Task context:\n" + "\n\n".join(sections)
+
+    @staticmethod
+    def _render_state_and_progress(task: str, history: list[dict[str, Any]]) -> str:
+        objective = ModelDrivenPolicy._current_objective(task)
+        observation = ModelDrivenPolicy._latest_observation(history)
+        successful_tools = sum(
+            1
+            for item in history
+            if str(item.get("step_type") or "") == "tool"
+            and bool(dict(item.get("output") or {}).get("ok"))
+        )
+
+        lines = [
+            "Current state and progress:",
+            f"- Objective: {objective or 'unspecified'}",
+        ]
+        if observation:
+            page_title = str(observation.get("page_title") or "").strip()
+            page_url = str(observation.get("page_url") or "").strip()
+            if page_title and page_url:
+                lines.append(f"- Current page: {page_title} ({page_url})")
+            elif page_title or page_url:
+                lines.append(f"- Current page: {page_title or page_url}")
+
+            console_errors = observation.get("console_errors")
+            console_warnings = observation.get("console_warnings")
+            if console_errors is not None or console_warnings is not None:
+                lines.append(
+                    "- Console: "
+                    f"{console_errors if console_errors is not None else '?'} errors, "
+                    f"{console_warnings if console_warnings is not None else '?'} warnings"
+                )
+
+            action_candidates = list(observation.get("action_candidates") or [])
+            if action_candidates:
+                options = ", ".join(str(item) for item in action_candidates[:6])
+                if len(action_candidates) > 6:
+                    options += ", ..."
+                lines.append(f"- Interactive options seen: {options}")
+
+            summary = str(observation.get("summary") or "").strip()
+            if summary:
+                lines.append(f"- Latest observation summary: {summary}")
+        else:
+            lines.append("- Current page: unknown (no structured observation yet)")
+
+        lines.append(f"- Successful tool actions so far: {successful_tools}")
+        lines.append(
+            "- Progress gap: task not yet complete; choose one next action that "
+            "materially advances the objective."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _latest_observation(history: list[dict[str, Any]]) -> dict[str, Any]:
+        for item in reversed(history):
+            if str(item.get("step_type") or "") != "tool":
+                continue
+            output = dict(item.get("output") or {})
+            if not output.get("ok"):
+                continue
+            observation = output.get("observation")
+            if isinstance(observation, dict) and observation:
+                return observation
+        return {}
+
+    @staticmethod
+    def _current_objective(task: str) -> str:
+        original_task, user_inputs = ModelDrivenPolicy._split_task_and_user_inputs(task)
+        objective = user_inputs[-1] if user_inputs else original_task
+        objective = str(objective or "").strip()
+        if len(objective) <= 260:
+            return objective
+        return objective[:260] + "..."
 
     @staticmethod
     def _decision_contract() -> str:

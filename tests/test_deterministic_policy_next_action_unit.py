@@ -37,7 +37,10 @@ def test_next_action_uses_model_for_first_step():
         "tool_name": "read_file",
         "args": {"path": "README.md"},
     }
-    assert "Task: read the readme" in gateway.calls[0]["task"]
+    prompt = gateway.calls[0]["task"]
+    assert "Task: read the readme" in prompt
+    assert "Current state and progress:" in prompt
+    assert "Progress gap:" in prompt
 
 
 def test_next_action_does_not_apply_keyword_heuristics():
@@ -92,8 +95,10 @@ def test_next_action_successful_tool_asks_model_for_followup():
     )
 
     assert action == {"kind": "final_answer", "message": "done"}
-    assert "Last tool: read_file" in gateway.calls[0]["task"]
-    assert "Tool completed with exit_code=None" in gateway.calls[0]["task"]
+    prompt = gateway.calls[0]["task"]
+    assert "Last tool: read_file" in prompt
+    assert "Tool completed with exit_code=None" in prompt
+    assert "Current state and progress:" in prompt
 
 
 def test_next_action_failure_replans_with_failure_context():
@@ -248,6 +253,7 @@ def test_next_action_prompt_prioritizes_latest_user_input():
     assert "Latest user input (highest priority):" in prompt
     assert "write a snarky reply to a popular post" in prompt
     assert "Prior user inputs:" in prompt
+    assert "Objective: write a snarky reply to a popular post" in prompt
 
 
 def test_next_action_stall_recovery_prompt_forbids_repeating_identical_action():
@@ -476,18 +482,93 @@ def test_summarize_tool_output_and_mcp_text_helpers():
     assert "Tool completed with exit_code=0" in summary
     assert "ok" in summary
 
-    mcp_summary = ModelDrivenPolicy._summarize_tool_output(
+    observed_summary = ModelDrivenPolicy._summarize_tool_output(
         {
+            "observation": {
+                "summary": "MCP tool `snapshot` completed. Page: Example.",
+                "page_url": "https://example.com",
+                "page_title": "Example",
+            },
             "mcp": {
+                "tool_name": "mcp.playwright.browser_snapshot",
                 "result": {
                     "content": [
-                        {"type": "text", "text": "from mcp"},
+                        {
+                            "type": "text",
+                            "text": "### Page\n- Page URL: https://example.com\n### Snapshot\n```yaml\n- huge",
+                        },
                     ]
                 }
             }
         }
     )
-    assert "from mcp" in mcp_summary
+    assert "Page: Example" in observed_summary
+    assert "### Snapshot" not in observed_summary
+
+    mcp_fallback = ModelDrivenPolicy._summarize_tool_output(
+        {
+            "mcp": {
+                "tool_name": "mcp.playwright.browser_snapshot",
+                "result": {"content": ["CallToolResult(content=[...])"]},
+            }
+        }
+    )
+    assert "mcp.playwright.browser_snapshot" in mcp_fallback
+    assert "content item(s)" in mcp_fallback
+    assert "CallToolResult" not in mcp_fallback
+
+
+def test_followup_prompt_uses_structured_observation_for_state_not_raw_snapshot_text():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "final_answer",
+                "args": {"message": "done"},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    _ = policy.next_action(
+        "navigate to any site and continue",
+        agent={
+            "tools_allowed": [
+                "mcp.playwright.browser_snapshot",
+                "final_answer",
+            ]
+        },
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {
+                    "ok": True,
+                    "observation": {
+                        "summary": "MCP tool `mcp.playwright.browser_snapshot` completed. Page: Example (https://example.com).",
+                        "page_title": "Example",
+                        "page_url": "https://example.com",
+                        "action_candidates": ["Home", "Post", "Notifications"],
+                    },
+                    "mcp": {
+                        "tool_name": "mcp.playwright.browser_snapshot",
+                        "result": {
+                            "content": [
+                                "### Page\\n- Page URL: https://example.com\\n### Snapshot\\n```yaml\\n- generic\\n  - huge"
+                            ]
+                        },
+                    },
+                },
+            }
+        ],
+    )
+
+    prompt = gateway.calls[0]["task"]
+    assert "Current page: Example (https://example.com)" in prompt
+    assert "Interactive options seen: Home, Post, Notifications" in prompt
+    assert "### Snapshot" not in prompt
+    assert "Timeline: Your Home Timeline" not in prompt
 
 
 def test_render_recent_history_includes_tools_and_statuses():

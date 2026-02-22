@@ -7,9 +7,11 @@ Model Context Protocol (MCP) servers started as subprocesses.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 import json
 import os
+import re
 import threading
 from typing import Any
 
@@ -86,7 +88,11 @@ class _PersistentMcpSession:
             return [tool.model_dump(by_alias=True, exclude_none=True) for tool in tools]
 
         future = asyncio.run_coroutine_threadsafe(_list(), self.loop)
-        return future.result(timeout=max(1, timeout_s + 1))
+        try:
+            return future.result(timeout=max(1, timeout_s + 1))
+        except FuturesTimeoutError:
+            future.cancel()
+            return _run_coro(_discover_tools_async(self.config, timeout_s=timeout_s))
 
     def call_tool(
         self,
@@ -108,7 +114,18 @@ class _PersistentMcpSession:
             return _normalize_tool_result(result)
 
         future = asyncio.run_coroutine_threadsafe(_call(), self.loop)
-        return future.result(timeout=max(1, timeout_s + 1))
+        try:
+            return future.result(timeout=max(1, timeout_s + 1))
+        except FuturesTimeoutError:
+            future.cancel()
+            return _run_coro(
+                _call_tool_async(
+                    self.config,
+                    remote_name=remote_name,
+                    args=args,
+                    timeout_s=timeout_s,
+                )
+            )
 
     def close(self) -> None:
         if self._closed.is_set():
@@ -253,6 +270,7 @@ def call_tool(
 
     is_error = _is_mcp_error_result(result)
     error_message = _extract_mcp_error_message(result)
+    observation = _build_structured_observation(result, remote_name=remote_name)
     return {
         "ok": not is_error,
         "mcp": {
@@ -260,6 +278,7 @@ def call_tool(
             "tool_name": remote_name,
             "result": result,
         },
+        **({"observation": observation} if observation else {}),
         **(
             {
                 "error": {
@@ -318,6 +337,201 @@ def _extract_mcp_content_texts(result: dict[str, Any]) -> list[str]:
             continue
         texts.append(str(item))
     return texts
+
+
+def _build_structured_observation(
+    result: dict[str, Any], *, remote_name: str
+) -> dict[str, Any]:
+    """Build compact structured observation from MCP result text."""
+    merged = _merge_mcp_text(result)
+    normalized = _normalize_mcp_text(merged)
+    if not normalized:
+        return {}
+
+    sections = _extract_markdown_sections(normalized)
+    page_url = _extract_page_field(normalized, "page url")
+    page_title = _extract_page_field(normalized, "page title")
+    console_errors, console_warnings = _extract_console_counts(normalized)
+    actions = _extract_action_candidates(normalized)
+    text = _compact_observation_text(normalized)
+
+    summary_bits = [f"MCP tool `{remote_name}` completed."]
+    if page_title or page_url:
+        label = page_title or page_url
+        if page_title and page_url:
+            label = f"{page_title} ({page_url})"
+        summary_bits.append(f"Page: {label}.")
+    if console_errors is not None or console_warnings is not None:
+        summary_bits.append(
+            "Console: "
+            f"{console_errors if console_errors is not None else '?'} errors, "
+            f"{console_warnings if console_warnings is not None else '?'} warnings."
+        )
+    if actions:
+        shown = ", ".join(actions[:4])
+        suffix = "..." if len(actions) > 4 else ""
+        summary_bits.append(f"Interactive targets: {shown}{suffix}.")
+    elif sections:
+        summary_bits.append("Sections: " + ", ".join(sections[:4]) + ".")
+    elif text:
+        summary_bits.append(text.splitlines()[0][:180])
+
+    observation: dict[str, Any] = {
+        "source": "mcp",
+        "tool_name": remote_name,
+        "summary": " ".join(part for part in summary_bits if part).strip(),
+    }
+    if page_url:
+        observation["page_url"] = page_url
+    if page_title:
+        observation["page_title"] = page_title
+    if console_errors is not None:
+        observation["console_errors"] = console_errors
+    if console_warnings is not None:
+        observation["console_warnings"] = console_warnings
+    if sections:
+        observation["sections"] = sections[:8]
+    if actions:
+        observation["action_candidates"] = actions[:12]
+    if text:
+        observation["text"] = text
+    return observation
+
+
+def _merge_mcp_text(result: dict[str, Any]) -> str:
+    """Join content texts into one string for parsing."""
+    texts = _extract_mcp_content_texts(result)
+    if not texts:
+        return ""
+    merged = "\n".join(text.strip() for text in texts if str(text).strip()).strip()
+    if not merged:
+        return ""
+    return _strip_ansi(merged)
+
+
+def _normalize_mcp_text(text: str) -> str:
+    """Normalize wrapped MCP text payloads into readable text."""
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    match = re.search(
+        r"TextContent\(\s*type=(?:'|\")text(?:'|\"),\s*text=(?P<quote>'|\")(?P<body>.*?)(?<!\\)(?P=quote)\s*\)",
+        value,
+        flags=re.DOTALL,
+    )
+    if match:
+        value = match.group("body")
+
+    return _unescape_common_sequences(value).strip()
+
+
+def _unescape_common_sequences(value: str) -> str:
+    """Decode common escaped sequences without full eval."""
+    decoded = str(value or "")
+    for old, new in [
+        ("\\r\\n", "\n"),
+        ("\\n", "\n"),
+        ("\\t", "\t"),
+        ("\\r", "\n"),
+        ("\\'", "'"),
+        ('\\"', '"'),
+        ("\\\\", "\\"),
+    ]:
+        decoded = decoded.replace(old, new)
+    return decoded
+
+
+def _extract_markdown_sections(text: str) -> list[str]:
+    """Extract markdown section headings (### Heading)."""
+    sections: list[str] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped.startswith("###"):
+            continue
+        heading = stripped.lstrip("#").strip()
+        if heading:
+            sections.append(heading)
+    return _unique_preserve_order(sections)
+
+
+def _extract_page_field(text: str, field: str) -> str:
+    """Extract a page metadata field from markdown bullet lines."""
+    wanted = field.lower().strip()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("- ") or ":" not in line:
+            continue
+        key, value = line[2:].split(":", 1)
+        if key.strip().lower() == wanted:
+            return value.strip()
+    return ""
+
+
+def _extract_console_counts(text: str) -> tuple[int | None, int | None]:
+    """Extract console error/warning counts when present."""
+    console_line = _extract_page_field(text, "console")
+    if not console_line:
+        return None, None
+    errors_match = re.search(r"(\d+)\s+errors?", console_line, flags=re.IGNORECASE)
+    warnings_match = re.search(
+        r"(\d+)\s+warnings?", console_line, flags=re.IGNORECASE
+    )
+    errors = int(errors_match.group(1)) if errors_match else None
+    warnings = int(warnings_match.group(1)) if warnings_match else None
+    return errors, warnings
+
+
+def _extract_action_candidates(text: str) -> list[str]:
+    """Extract likely interactive labels from snapshot text."""
+    labels: list[str] = []
+    pattern = re.compile(
+        r'\b(?:button|link|textbox|tab|menuitem)\s+"([^"]+)"', flags=re.IGNORECASE
+    )
+    for match in pattern.finditer(text):
+        label = match.group(1).strip()
+        if not label:
+            continue
+        if len(label) > 80:
+            continue
+        labels.append(label)
+    return _unique_preserve_order(labels)
+
+
+def _compact_observation_text(text: str, max_chars: int = 1200) -> str:
+    """Compact verbose snapshot output into short, high-signal text."""
+    lines: list[str] = []
+    in_code_block = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        lines.append(stripped)
+        if len(lines) >= 40:
+            break
+
+    compact = "\n".join(lines).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars] + "..."
+
+
+def _unique_preserve_order(values: list[str]) -> list[str]:
+    """Return unique values while preserving first-seen order."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
 
 
 def _strip_ansi(value: str) -> str:

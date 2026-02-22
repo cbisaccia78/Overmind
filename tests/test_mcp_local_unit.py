@@ -138,6 +138,9 @@ def test_call_tool_success_error_and_session_paths(
     ok = mcp_local.call_tool(config, "echo", {"text": "x"})
     assert ok["ok"] is True
     assert ok["mcp"]["server_id"] == "demo"
+    assert ok["observation"]["source"] == "mcp"
+    assert ok["observation"]["tool_name"] == "echo"
+    assert "MCP tool `echo` completed." in ok["observation"]["summary"]
 
     def _run_is_error(coro):
         coro.close()
@@ -194,6 +197,33 @@ def test_call_tool_success_error_and_session_paths(
     )
     assert via_session["ok"] is True
     assert session.calls == [("echo", {"text": "x"}, 5)]
+
+
+def test_structured_observation_extracts_generic_page_metadata() -> None:
+    wrapped = (
+        "CallToolResult(content=[TextContent(type='text', text='### Page\\n"
+        "- Page URL: https://example.com/path\\n"
+        "- Page Title: Example Domain\\n"
+        "- Console: 1 errors, 2 warnings\\n"
+        "### Snapshot\\n"
+        "```yaml\\n"
+        "- button \"Post\"\\n"
+        "- link \"Home\"\\n"
+        "```')], isError=False)"
+    )
+    observation = mcp_local._build_structured_observation(
+        {"isError": False, "content": [wrapped]},
+        remote_name="browser_snapshot",
+    )
+
+    assert observation["page_url"] == "https://example.com/path"
+    assert observation["page_title"] == "Example Domain"
+    assert observation["console_errors"] == 1
+    assert observation["console_warnings"] == 2
+    assert observation["sections"][:2] == ["Page", "Snapshot"]
+    assert "Post" in observation["action_candidates"]
+    assert "Home" in observation["action_candidates"]
+    assert "- button \"Post\"" not in observation["text"]
 
 
 def test_close_sessions_and_get_or_create_session_paths(
