@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import time
+import json
+
+import app.main as main_module
 
 
 def test_dashboard_pages_render(client):
@@ -13,6 +16,42 @@ def test_dashboard_pages_render(client):
 
     runs = client.get("/runs")
     assert runs.status_code == 200
+
+
+def test_agents_page_model_dropdown_uses_active_provider_models(client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+
+    class _Resp:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        url = req.full_url
+        if "api.openai.com" in url:
+            return _Resp({"data": [{"id": "gpt-4.1-mini"}]})
+        if "api.deepseek.com" in url:
+            return _Resp({"data": [{"id": "deepseek-chat"}]})
+        return _Resp({"data": []})
+
+    monkeypatch.setattr(main_module.urlrequest, "urlopen", _urlopen)
+
+    agents = client.get("/agents")
+    assert agents.status_code == 200
+    assert 'name="model"' in agents.text
+    assert "OpenAI · gpt-4.1-mini" in agents.text
+    assert "DeepSeek · deepseek-chat" in agents.text
 
 
 def test_runs_requires_agent_before_start(client):

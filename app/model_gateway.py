@@ -78,7 +78,16 @@ class ModelGateway:
 
         start = time.monotonic()
         try:
-            if self._should_use_openai(allowed_tools):
+            model_name = str(model or "").strip().lower()
+            if self._should_use_deepseek(model=model, allowed_tools=allowed_tools):
+                response_json = self._infer_with_deepseek(
+                    task=task,
+                    model=model,
+                    allowed_tools=allowed_tools,
+                )
+            elif model_name.startswith("deepseek"):
+                response_json = self._infer_with_model(task=task, model=model)
+            elif self._should_use_openai(allowed_tools):
                 response_json = self._infer_with_openai(
                     task=task,
                     model=model,
@@ -141,6 +150,16 @@ class ModelGateway:
             and self.openai_tools_provider is not None
         )
 
+    def _should_use_deepseek(self, *, model: str, allowed_tools: list[str]) -> bool:
+        """Return whether DeepSeek tool-calling should be used."""
+        model_name = str(model or "").strip().lower()
+        return bool(
+            model_name.startswith("deepseek")
+            and os.getenv("DEEPSEEK_API_KEY")
+            and allowed_tools
+            and self.openai_tools_provider is not None
+        )
+
     def _infer_with_openai(
         self,
         *,
@@ -148,28 +167,58 @@ class ModelGateway:
         model: str,
         allowed_tools: list[str],
     ) -> dict[str, Any]:
-        """Infer a tool call by invoking OpenAI chat-completions tool calling.
-
-        Args:
-            task: Task text.
-            model: Model identifier.
-            allowed_tools: Allowed tool names for the current agent.
-
-        Returns:
-            Dict containing `tool_name` and `args`.
-
-        Raises:
-            RuntimeError: If the API key is missing, response is malformed, or no
-                tool call is returned.
-        """
+        """Infer a tool call via OpenAI-compatible chat-completions."""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI tool calling")
+        endpoint = os.getenv(
+            "OVERMIND_OPENAI_CHAT_COMPLETIONS_URL",
+            "https://api.openai.com/v1/chat/completions",
+        )
+        return self._infer_with_openai_compatible(
+            task=task,
+            model=model,
+            allowed_tools=allowed_tools,
+            api_key=api_key,
+            endpoint=endpoint,
+        )
 
+    def _infer_with_deepseek(
+        self,
+        *,
+        task: str,
+        model: str,
+        allowed_tools: list[str],
+    ) -> dict[str, Any]:
+        """Infer a tool call via DeepSeek's OpenAI-compatible API."""
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY is required for DeepSeek tool calling")
+        endpoint = os.getenv(
+            "OVERMIND_DEEPSEEK_CHAT_COMPLETIONS_URL",
+            "https://api.deepseek.com/v1/chat/completions",
+        )
+        return self._infer_with_openai_compatible(
+            task=task,
+            model=model,
+            allowed_tools=allowed_tools,
+            api_key=api_key,
+            endpoint=endpoint,
+        )
+
+    def _infer_with_openai_compatible(
+        self,
+        *,
+        task: str,
+        model: str,
+        allowed_tools: list[str],
+        api_key: str,
+        endpoint: str,
+    ) -> dict[str, Any]:
+        """Infer one tool call using an OpenAI-compatible chat completions API."""
         tools, alias_map = self._get_openai_tools(allowed_tools)
         if not tools:
             raise RuntimeError("No allowed tools available for OpenAI tool calling")
-
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": task}],
@@ -178,10 +227,6 @@ class ModelGateway:
             "temperature": 0,
         }
 
-        endpoint = os.getenv(
-            "OVERMIND_OPENAI_CHAT_COMPLETIONS_URL",
-            "https://api.openai.com/v1/chat/completions",
-        )
         timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
         data = self._request_openai_chat_completion(
             payload=payload,

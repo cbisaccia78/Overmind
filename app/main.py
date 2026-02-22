@@ -90,6 +90,9 @@ class AppState:
         stored_openai_key = self.repo.get_setting("openai_api_key")
         if stored_openai_key and not os.getenv("OPENAI_API_KEY"):
             os.environ["OPENAI_API_KEY"] = stored_openai_key
+        stored_deepseek_key = self.repo.get_setting("deepseek_api_key")
+        if stored_deepseek_key and not os.getenv("DEEPSEEK_API_KEY"):
+            os.environ["DEEPSEEK_API_KEY"] = stored_deepseek_key
 
         self.memory = LocalVectorMemory(self.repo)
         self.shell_runner = ShellRunner(workspace_root=workspace)
@@ -174,7 +177,7 @@ def _available_tools() -> list[str]:
     return _services().gateway.list_tool_names()
 
 
-def _mask_openai_key(key: str | None) -> str:
+def _mask_api_key(key: str | None) -> str:
     """Return a masked display value for API keys."""
     if not key:
         return ""
@@ -183,11 +186,15 @@ def _mask_openai_key(key: str | None) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
-def _test_openai_key(api_key: str) -> tuple[bool, str]:
-    """Validate OpenAI key by calling the models endpoint."""
-    endpoint = os.getenv(
-        "OVERMIND_OPENAI_MODELS_URL", "https://api.openai.com/v1/models"
-    )
+def _mask_openai_key(key: str | None) -> str:
+    """Backward-compatible wrapper for OpenAI key masking."""
+    return _mask_api_key(key)
+
+
+def _test_api_key(
+    *, api_key: str, endpoint: str, provider_name: str
+) -> tuple[bool, str]:
+    """Validate provider API key by calling the models endpoint."""
     req = urlrequest.Request(
         endpoint,
         headers={
@@ -197,11 +204,124 @@ def _test_openai_key(api_key: str) -> tuple[bool, str]:
     )
     try:
         with urlrequest.urlopen(req, timeout=10):
-            return True, "OpenAI key is valid."
+            return True, f"{provider_name} key is valid."
     except urlerror.HTTPError as exc:
-        return False, f"OpenAI key test failed: HTTP {exc.code}"
+        return False, f"{provider_name} key test failed: HTTP {exc.code}"
     except (urlerror.URLError, TimeoutError) as exc:
-        return False, f"OpenAI key test failed: {exc}"
+        return False, f"{provider_name} key test failed: {exc}"
+
+
+def _test_openai_key(api_key: str) -> tuple[bool, str]:
+    """Validate OpenAI key by calling the models endpoint."""
+    return _test_api_key(
+        api_key=api_key,
+        endpoint=os.getenv(
+            "OVERMIND_OPENAI_MODELS_URL", "https://api.openai.com/v1/models"
+        ),
+        provider_name="OpenAI",
+    )
+
+
+def _test_deepseek_key(api_key: str) -> tuple[bool, str]:
+    """Validate DeepSeek key by calling the models endpoint."""
+    return _test_api_key(
+        api_key=api_key,
+        endpoint=os.getenv(
+            "OVERMIND_DEEPSEEK_MODELS_URL", "https://api.deepseek.com/v1/models"
+        ),
+        provider_name="DeepSeek",
+    )
+
+
+def _provider_key_status(
+    *, setting_key: str, env_key: str
+) -> tuple[bool, str | None]:
+    """Return (configured, masked) status for a provider API key."""
+    stored = _services().repo.get_setting(setting_key)
+    active = os.getenv(env_key)
+    key = active or stored
+    return bool(key), _mask_api_key(key) if key else None
+
+
+def _fetch_provider_models(*, api_key: str, endpoint: str) -> list[str]:
+    """Fetch model IDs from an OpenAI-compatible /models endpoint."""
+    req = urlrequest.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="GET",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError):
+        return []
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    models: list[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if model_id:
+            models.append(model_id)
+    return sorted(set(models))
+
+
+def _available_remote_models() -> list[dict[str, str]]:
+    """Return available model options from all configured remote providers."""
+    options: list[dict[str, str]] = [
+        {
+            "provider": "local",
+            "id": "stub-v1",
+            "label": "Local · stub-v1",
+        }
+    ]
+
+    openai_key = os.getenv("OPENAI_API_KEY") or _services().repo.get_setting(
+        "openai_api_key"
+    )
+    if openai_key:
+        for model_id in _fetch_provider_models(
+            api_key=openai_key,
+            endpoint=os.getenv(
+                "OVERMIND_OPENAI_MODELS_URL", "https://api.openai.com/v1/models"
+            ),
+        ):
+            options.append(
+                {"provider": "openai", "id": model_id, "label": f"OpenAI · {model_id}"}
+            )
+
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY") or _services().repo.get_setting(
+        "deepseek_api_key"
+    )
+    if deepseek_key:
+        for model_id in _fetch_provider_models(
+            api_key=deepseek_key,
+            endpoint=os.getenv(
+                "OVERMIND_DEEPSEEK_MODELS_URL", "https://api.deepseek.com/v1/models"
+            ),
+        ):
+            options.append(
+                {
+                    "provider": "deepseek",
+                    "id": model_id,
+                    "label": f"DeepSeek · {model_id}",
+                }
+            )
+
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, str]] = []
+    for item in options:
+        key = (item["provider"], item["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 async def _parse_urlencoded_form(request: Request) -> dict[str, str]:
@@ -286,6 +406,26 @@ def _run_detail_context(
         "awaiting_prompt": awaiting_prompt,
         "run_input_error": run_input_error,
         "run_input_value": run_input_value,
+    }
+
+
+def _settings_context(
+    *,
+    settings_error: str | None = None,
+    settings_message: str | None = None,
+) -> dict[str, Any]:
+    """Build settings page context with provider key statuses and MCP servers."""
+    openai_status = get_openai_key_status()
+    deepseek_status = get_deepseek_key_status()
+    mcp_servers = list_mcp_local_servers()["servers"]
+    return {
+        "openai_configured": openai_status["configured"],
+        "openai_masked": openai_status["masked"],
+        "deepseek_configured": deepseek_status["configured"],
+        "deepseek_masked": deepseek_status["masked"],
+        "mcp_servers": mcp_servers,
+        "settings_error": settings_error,
+        "settings_message": settings_message,
     }
 
 
@@ -666,13 +806,26 @@ def search_memory(payload: MemorySearchRequest) -> dict[str, Any]:
 @app.get("/api/settings/openai-key")
 def get_openai_key_status() -> dict[str, Any]:
     """Return whether an OpenAI API key is configured."""
-    stored = _services().repo.get_setting("openai_api_key")
-    active = os.getenv("OPENAI_API_KEY")
-    key = active or stored
+    configured, masked = _provider_key_status(
+        setting_key="openai_api_key", env_key="OPENAI_API_KEY"
+    )
     return {
         "ok": True,
-        "configured": bool(key),
-        "masked": _mask_openai_key(key),
+        "configured": configured,
+        "masked": masked or "",
+    }
+
+
+@app.get("/api/settings/deepseek-key")
+def get_deepseek_key_status() -> dict[str, Any]:
+    """Return whether a DeepSeek API key is configured."""
+    configured, masked = _provider_key_status(
+        setting_key="deepseek_api_key", env_key="DEEPSEEK_API_KEY"
+    )
+    return {
+        "ok": True,
+        "configured": configured,
+        "masked": masked or "",
     }
 
 
@@ -752,18 +905,21 @@ def agents_page(request: Request) -> HTMLResponse:
     Returns:
         HTML response.
     """
+    available_tools = _available_tools()
+    available_models = _available_remote_models()
     return templates.TemplateResponse(
         request,
         "agents.html",
         {
             "agents": _services().repo.list_agents(),
-            "available_tools": _available_tools(),
+            "available_tools": available_tools,
+            "available_models": available_models,
             "form_error": None,
             "form_values": {
                 "name": "",
                 "role": "operator",
                 "model": "",
-                "tools": _available_tools(),
+                "tools": available_tools,
             },
         },
     )
@@ -785,13 +941,17 @@ async def create_agent_form(request: Request) -> Response:
     model = (form.get("model", [""])[-1]).strip()
     tools = [tool.strip() for tool in form.get("tools", []) if tool.strip()]
 
+    available_tools = _available_tools()
+    available_models = _available_remote_models()
+
     if not name or not role or not model:
         return templates.TemplateResponse(
             request,
             "agents.html",
             {
                 "agents": _services().repo.list_agents(),
-                "available_tools": _available_tools(),
+                "available_tools": available_tools,
+                "available_models": available_models,
                 "form_error": "Name, role, and model are required.",
                 "form_values": {
                     "name": name,
@@ -1023,18 +1183,10 @@ async def provide_run_input_form(run_id: str, request: Request) -> Response:
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
     """Render application settings page."""
-    status = get_openai_key_status()
-    mcp_servers = list_mcp_local_servers()["servers"]
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {
-            "openai_configured": status["configured"],
-            "openai_masked": status["masked"],
-            "mcp_servers": mcp_servers,
-            "settings_error": None,
-            "settings_message": None,
-        },
+        _settings_context(),
     )
 
 
@@ -1076,18 +1228,60 @@ async def settings_openai_form(request: Request) -> HTMLResponse:
             _services().memory.reload_backend()
             settings_message = "OpenAI API key saved."
 
-    status = get_openai_key_status()
-    mcp_servers = list_mcp_local_servers()["servers"]
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {
-            "openai_configured": status["configured"],
-            "openai_masked": status["masked"],
-            "mcp_servers": mcp_servers,
-            "settings_error": settings_error,
-            "settings_message": settings_message,
-        },
+        _settings_context(
+            settings_error=settings_error,
+            settings_message=settings_message,
+        ),
+        status_code=422 if settings_error else 200,
+    )
+
+
+@app.post("/settings/deepseek", response_class=HTMLResponse)
+async def settings_deepseek_form(request: Request) -> HTMLResponse:
+    """Handle DeepSeek key save/clear/test actions from settings page."""
+    form = await _parse_urlencoded_form(request)
+    action = (form.get("action") or "save").strip().lower()
+    key_input = (form.get("deepseek_api_key") or "").strip()
+    repo = _services().repo
+
+    stored = repo.get_setting("deepseek_api_key")
+    active = os.getenv("DEEPSEEK_API_KEY")
+    effective_key = key_input or active or stored
+
+    settings_error: str | None = None
+    settings_message: str | None = None
+
+    if action == "test":
+        if not effective_key:
+            settings_error = "No DeepSeek API key is configured."
+        else:
+            ok, message = _test_deepseek_key(effective_key)
+            if ok:
+                settings_message = message
+            else:
+                settings_error = message
+    elif action == "clear":
+        repo.set_setting("deepseek_api_key", None)
+        os.environ.pop("DEEPSEEK_API_KEY", None)
+        settings_message = "DeepSeek API key removed."
+    else:
+        if not key_input:
+            settings_error = "DeepSeek API key is required to save."
+        else:
+            repo.set_setting("deepseek_api_key", key_input)
+            os.environ["DEEPSEEK_API_KEY"] = key_input
+            settings_message = "DeepSeek API key saved."
+
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        _settings_context(
+            settings_error=settings_error,
+            settings_message=settings_message,
+        ),
         status_code=422 if settings_error else 200,
     )
 
@@ -1132,18 +1326,13 @@ async def settings_mcp_form(request: Request) -> HTMLResponse:
             upsert_mcp_local_server(payload)
             settings_message = f"Saved MCP server '{server_id}'."
 
-    status = get_openai_key_status()
-    mcp_servers = list_mcp_local_servers()["servers"]
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {
-            "openai_configured": status["configured"],
-            "openai_masked": status["masked"],
-            "mcp_servers": mcp_servers,
-            "settings_error": settings_error,
-            "settings_message": settings_message,
-        },
+        _settings_context(
+            settings_error=settings_error,
+            settings_message=settings_message,
+        ),
         status_code=422 if settings_error else 200,
     )
 

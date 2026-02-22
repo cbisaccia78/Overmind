@@ -37,6 +37,30 @@
 </section>
 
 <section class="card">
+  <h3>DeepSeek</h3>
+  <p class="muted">
+    Status:
+    {% if deepseek_configured %}
+      <span class="pill pill-good">Configured ({{ deepseek_masked }})</span>
+    {% else %}
+      <span class="pill pill-neutral">Not configured</span>
+    {% endif %}
+  </p>
+
+  <form method="post" action="/settings/deepseek" class="form-grid">
+    <label>
+      DeepSeek API Key
+      <input type="password" name="deepseek_api_key" placeholder="sk-..." autocomplete="off" />
+    </label>
+    <div class="hero-actions">
+      <button class="primary" type="submit" name="action" value="save">Save Key</button>
+      <button type="submit" name="action" value="test">Test Key</button>
+      <button type="submit" name="action" value="clear">Remove Key</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
   <h3>Local MCP Servers</h3>
   <p class="muted">Register local stdio MCP servers. Discovered tools appear in the agent tool picker as <code>mcp.&lt;server_id&gt;.&lt;tool&gt;</code>.</p>
 

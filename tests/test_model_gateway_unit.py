@@ -156,6 +156,91 @@ def test_model_gateway_uses_openai_tool_call_when_configured(tmp_path, monkeypat
     assert rows[0]["error"] is None
 
 
+def test_model_gateway_uses_deepseek_tool_call_when_model_is_deepseek(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "model-deepseek.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+
+    def fake_openai_tools_provider(tool_names: list[str]) -> list[dict]:
+        assert tool_names == ["read_file", "ask_user", "final_answer"]
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            body = {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json.dumps({"path": "README.md"}),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+            return json.dumps(body).encode("utf-8")
+
+    gateway = ModelGateway(repo, openai_tools_provider=fake_openai_tools_provider)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(
+        model_gateway_module.urlrequest,
+        "urlopen",
+        lambda req, timeout=10: _FakeResp(),
+    )
+
+    agent = repo.create_agent(
+        name="planner-deepseek",
+        role="ops",
+        model="deepseek-chat",
+        tools_allowed=["read_file"],
+    )
+    run = repo.create_run(agent["id"], "read README", step_limit=3)
+
+    result = gateway.infer(
+        task="read README",
+        agent=agent,
+        context={"run_id": run["id"]},
+    )
+
+    assert result["ok"] is True
+    assert result["tool_name"] == "read_file"
+    assert result["args"] == {"path": "README.md"}
+
+    rows = repo.list_model_calls(run["id"])
+    assert len(rows) == 1
+    assert rows[0]["response_json"]["tool_name"] == "read_file"
+    assert rows[0]["error"] is None
+
+
 def test_model_gateway_resolves_openai_tool_aliases(tmp_path, monkeypatch):
     db_path = str(tmp_path / "model-openai-alias.db")
     init_db(db_path)

@@ -13,7 +13,15 @@
   <form method="post" action="/agents" class="form-grid">
     <label>Name <input name="name" placeholder="release-manager" value="{{ form_values.name }}" /></label>
     <label>Role <input name="role" value="{{ form_values.role }}" /></label>
-    <label>Model (required) <input name="model" placeholder="example: gpt-4.1-mini" value="{{ form_values.model }}" /></label>
+    <label>
+      Model (required)
+      <select name="model" required>
+        <option value="">Select a model</option>
+        {% for model in available_models %}
+          <option value="{{ model.id }}" {% if model.id == form_values.model %}selected{% endif %}>{{ model.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <div class="field-block">
       <span class="field-label">Tools</span>
       <div class="tool-picker" role="group" aria-label="Tools">

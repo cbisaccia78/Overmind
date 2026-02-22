@@ -20,6 +20,7 @@ def _isolate_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
     if os.getenv("OVERMIND_TEST_KEEP_OPENAI") == "1":
         return
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OVERMIND_EMBEDDING_PROVIDER", raising=False)
 
 
