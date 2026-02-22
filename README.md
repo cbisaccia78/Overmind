@@ -27,17 +27,18 @@ The easiest way to use overmind is to download the latest release from the GitHu
 
 We currently only support Linux, so if you're on mac/windows you need to set up a linux VM.
 
-## Configure OpenAI Key (Desktop App)
+## Configure Model Provider Keys (Desktop App)
 
-You can set your OpenAI key directly in the app:
+You can set OpenAI and/or DeepSeek keys directly in the app:
 
 1. Open Overmind.
 2. Go to **Settings**.
-3. Paste your key into **OpenAI API Key**.
+3. Paste your key into **OpenAI API Key** and/or **DeepSeek API Key**.
 4. Click **Save Key**.
 5. (Optional) Click **Test Key** to verify it works.
 
-This key is saved in Overmind app settings and is loaded automatically when you launch the app from the desktop icon.
+Configured keys are saved in Overmind app settings and loaded automatically on startup.
+The agent creation page model dropdown includes models discovered from all active providers (plus local `stub-v1`).
 
 ## Run from Source (Development)
 
@@ -84,7 +85,10 @@ Electron desktop shell + single-process Python FastAPI backend:
 - SQLite for local persistence
 - Host shell runner
 - Agent Registry (CRUD + version increments)
-- Deterministic Orchestrator (step loop, retries, step limit)
+- Hybrid Orchestrator (deterministic control loop + model-driven planning)
+- Supervisor (heuristic authority + optional LLM advisory directives)
+- Policy Layer (`ModelDrivenPolicy` default, `DeterministicPolicy` fallback)
+- Action Validator (tool outcome quality + low-progress signals)
 - Tool Gateway (allowlist + strict arg validation + audit log)
 - Host Shell Runner (direct host OS execution)
 - Memory (FTS-backed retrieval + optional embeddings)
@@ -96,6 +100,11 @@ Key files:
 - [app/db.py](app/db.py)
 - [app/repository.py](app/repository.py)
 - [app/orchestrator.py](app/orchestrator.py)
+- [app/supervisor.py](app/supervisor.py)
+- [app/model_gateway.py](app/model_gateway.py)
+- [app/model_driven_policy.py](app/model_driven_policy.py)
+- [app/deterministic_policy.py](app/deterministic_policy.py)
+- [app/validator.py](app/validator.py)
 - [app/tool_gateway.py](app/tool_gateway.py)
 - [app/shell_runner.py](app/shell_runner.py)
 - [app/memory.py](app/memory.py)
@@ -161,9 +170,15 @@ Environment variables:
 - `OVERMIND_DB`: SQLite DB path (default: `data/overmind.db`).
 - `OVERMIND_WORKSPACE`: Workspace root used to constrain file tools (defaults to the repo root).
 - `OVERMIND_EMBEDDING_PROVIDER`: `auto` (default), `openai` (requires `OPENAI_API_KEY`), or any other value to force local FTS/BM25 mode.
-- `OPENAI_API_KEY`: Optional; if set (and provider is `auto`/`openai`), memory embeddings are generated via OpenAI.
+- `OPENAI_API_KEY`: Optional; enables OpenAI model calls and (when embedding provider is `auto`/`openai`) OpenAI embeddings.
+- `DEEPSEEK_API_KEY`: Optional; enables DeepSeek model calls and model discovery.
 - `OVERMIND_EMBEDDING_MODEL`: OpenAI embedding model name (default: `text-embedding-3-small`).
 - `OVERMIND_OPENAI_EMBEDDINGS_URL`: Optional override for the embeddings endpoint.
+- `OVERMIND_OPENAI_CHAT_COMPLETIONS_URL`: Optional override for OpenAI-compatible chat completions.
+- `OVERMIND_DEEPSEEK_CHAT_COMPLETIONS_URL`: Optional override for DeepSeek chat completions.
+- `OVERMIND_OPENAI_MODELS_URL`: Optional override for OpenAI `/models` discovery.
+- `OVERMIND_DEEPSEEK_MODELS_URL`: Optional override for DeepSeek `/models` discovery.
+- `OVERMIND_OPENAI_TIMEOUT_S`: Timeout in seconds for model HTTP calls (default: `10`).
 
 ## API Coverage
 
@@ -182,6 +197,7 @@ Runs:
 - `POST /api/runs/{id}/input`
 - `GET /api/runs/{id}/steps`
 - `GET /api/runs/{id}/tool-calls`
+- `GET /api/runs/{id}/model-calls`
 - `GET /api/runs/{id}/events`
 - `GET /api/runs/{id}/replay`
 
@@ -191,6 +207,13 @@ Memory:
 
 Tool Gateway:
 - `POST /api/runs/{id}/tools/call`
+
+Settings:
+- `GET /api/settings/openai-key`
+- `GET /api/settings/deepseek-key`
+- `GET /api/settings/mcp/servers`
+- `POST /api/settings/mcp/servers`
+- `DELETE /api/settings/mcp/servers/{server_id}`
 
 ## Host Shell Notes
 

@@ -26,7 +26,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .db import init_db, resolve_db_path
-from .deterministic_policy import DeterministicPolicy
 from .model_driven_policy import ModelDrivenPolicy
 from .mcp_local import LocalMcpServerConfig
 from .memory import LocalVectorMemory
@@ -62,6 +61,8 @@ class AppState:
         memory: Local memory subsystem (FTS-backed retrieval + optional embeddings).
         shell_runner: Host shell runner.
         model_gateway: Model inference facade that records audit telemetry.
+        supervisor: Strategic controller that emits per-turn directives.
+        policy: Tactical planner (model-driven by default).
         gateway: Tool execution gateway.
         orchestrator: Background run orchestrator.
     """

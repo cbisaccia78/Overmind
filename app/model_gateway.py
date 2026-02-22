@@ -1,7 +1,7 @@
 """Model inference gateway.
 
-Generates tool-call decisions from task text using an agent's configured model,
-and persists model interaction telemetry for auditability.
+Generates tool-call decisions and supervisor advisory directives using an
+agent's configured model, then persists interaction telemetry for auditability.
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from .repository import Repository
 class ModelGateway:
     """Model inference facade that records request/response telemetry.
 
-    The gateway returns a normalized tool-call decision and persists a
-    corresponding row in `model_calls` for auditing.
+    The gateway returns normalized tool-call decisions (plus optional
+    supervisor advisory payloads) and persists corresponding `model_calls`
+    rows for auditing.
     """
 
     def __init__(

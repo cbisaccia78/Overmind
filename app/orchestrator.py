@@ -1,7 +1,7 @@
-"""Deterministic orchestrator for executing runs.
+"""Run orchestrator for executing agent workflows.
 
-Plans actions via a policy, executes tools via the gateway, and records
-steps/events with retry and step-limit handling.
+Owns the deterministic control loop (state transitions, retries, budgeting)
+while delegating action selection to policy + supervisor components.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ class RetryConfig:
 
 
 class Orchestrator:
-    """Execute runs deterministically and persist steps, tool calls, and events."""
+    """Execute runs and persist steps, tool calls, and events."""
 
     def __init__(
         self,
