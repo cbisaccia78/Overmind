@@ -310,34 +310,53 @@ class ModelGateway:
         Raises:
             ValueError: If the model is configured to fail.
         """
-        lowered = (task or "").strip().lower()
+        raw_task = (task or "").strip()
+        normalized_task = self._extract_task_from_policy_prompt(raw_task)
+        lowered = normalized_task.lower()
         if model.startswith("fail"):
             raise ValueError(f"model '{model}' is unavailable")
 
+        if self._is_followup_policy_prompt(raw_task) and not self._is_failure_prompt(
+            raw_task
+        ):
+            return {"tool_name": "final_answer", "args": {"message": "done"}}
+
+        curl_url = self._extract_url(normalized_task)
+        if "curl" in lowered:
+            if not curl_url:
+                return {
+                    "tool_name": "ask_user",
+                    "args": {"message": "Please provide the full URL to fetch."},
+                }
+            return {
+                "tool_name": "run_shell",
+                "args": {"command": f"curl -L --max-time 20 {curl_url}"},
+            }
+
         if self._looks_like_shell(lowered):
-            command = self._extract_shell_command(task)
+            command = self._extract_shell_command(normalized_task)
             return {"tool_name": "run_shell", "args": {"command": command}}
 
         if self._looks_like_write(lowered):
-            path, content = self._extract_write_payload(task)
+            path, content = self._extract_write_payload(normalized_task)
             return {
                 "tool_name": "write_file",
                 "args": {"path": path, "content": content},
             }
 
         if self._looks_like_read(lowered):
-            path = self._extract_read_path(task)
+            path = self._extract_read_path(normalized_task)
             return {"tool_name": "read_file", "args": {"path": path}}
 
         if self._looks_like_recall(lowered):
-            collection, query = self._extract_memory_query(task)
+            collection, query = self._extract_memory_query(normalized_task)
             return {
                 "tool_name": "search_memory",
                 "args": {"collection": collection, "query": query, "top_k": 5},
             }
 
         if self._looks_like_remember(lowered):
-            collection, text = self._extract_memory_store(task)
+            collection, text = self._extract_memory_store(normalized_task)
             return {
                 "tool_name": "store_memory",
                 "args": {"collection": collection, "text": text},
@@ -347,10 +366,46 @@ class ModelGateway:
             "tool_name": "store_memory",
             "args": {
                 "collection": "runs",
-                "text": task,
+                "text": normalized_task,
                 "metadata": {"source": "task"},
             },
         }
+
+    @staticmethod
+    def _extract_task_from_policy_prompt(task: str) -> str:
+        """Extract original task text from policy-generated prompts when present."""
+        text = str(task or "").strip()
+        if not text.lower().startswith("task:"):
+            return text
+        match = re.search(
+            (
+                r"^\s*Task:\s*(.*?)\n\n(?:"
+                r"Last tool:|Recent run history:|Prior failures:|"
+                r"Decide the next action\.|Choose the next action\.)"
+            ),
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return match.group(1).strip()
+        return re.sub(r"^\s*Task:\s*", "", text, flags=re.IGNORECASE).strip()
+
+    @staticmethod
+    def _is_followup_policy_prompt(task: str) -> bool:
+        text = str(task or "")
+        return "Last tool:" in text and "Last tool result summary:" in text
+
+    @staticmethod
+    def _is_failure_prompt(task: str) -> bool:
+        text = str(task or "")
+        return "Most recent failure:" in text and "Prior failures:" in text
+
+    @staticmethod
+    def _extract_url(task: str) -> str | None:
+        match = re.search(r"https?://[^\s'\"]+", task or "")
+        if not match:
+            return None
+        return match.group(0)
 
     @staticmethod
     def _estimate_usage(task: str, response: dict[str, Any]) -> dict[str, int]:

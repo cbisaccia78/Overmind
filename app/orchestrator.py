@@ -114,16 +114,6 @@ class Orchestrator:
             return False
 
         step_limit = int(run["step_limit"])
-        planning_contract = self._build_planning_contract(str(run.get("task") or ""))
-        self.repo.create_event(
-            run_id,
-            "run.contract_mapped",
-            {
-                "run_id": run_id,
-                "task": str(run.get("task") or ""),
-                "planning_contract": planning_contract,
-            },
-        )
         self.repo.update_run_status(run_id, "running")
         if not run.get("started_at"):
             self.repo.create_event(
@@ -179,8 +169,6 @@ class Orchestrator:
                 self.repo.create_event(run_id, "run.canceled", {"run_id": run_id})
                 return False
 
-            progress_state = self._build_progress_state(history, planning_contract)
-
             action = self.policy.next_action(
                 run["task"],
                 agent=agent,
@@ -189,8 +177,6 @@ class Orchestrator:
                     "step_limit": step_limit,
                     "history": history,
                     "failure_memory": self._build_failure_memory(history),
-                    "planning_contract": planning_contract,
-                    "progress_state": progress_state,
                 },
                 history=history,
             )
@@ -203,10 +189,6 @@ class Orchestrator:
                     "idx": idx,
                     "kind": kind,
                     "action": self._action_preview(action),
-                    "progress_state": progress_state,
-                    "planning_contract_mode": str(
-                        planning_contract.get("mode") or "generic"
-                    ),
                 },
             )
 
@@ -243,23 +225,6 @@ class Orchestrator:
                         }
                     )
                     idx += 1
-                    progress_state = self._build_progress_state(
-                        history, planning_contract
-                    )
-                    if self._should_pause_for_repetition(
-                        planning_contract=planning_contract,
-                        progress_state=progress_state,
-                    ):
-                        self._pause_for_user(
-                            run_id=run_id,
-                            idx=idx,
-                            prompt=(
-                                "I am repeating the same successful action without "
-                                "making measurable progress. Please clarify which "
-                                "specific Wikipedia pages to visit next."
-                            ),
-                        )
-                        return True
                     continue
 
                 message = result.get("error", {}).get("message", "tool failed")
@@ -432,209 +397,6 @@ class Orchestrator:
             self.repo.update_run_status(run_id, "failed")
         return False
 
-    def _pause_for_user(self, *, run_id: str, idx: int, prompt: str) -> None:
-        """Pause a run and request user input with a persisted ask-user step."""
-        step = self.repo.create_step(
-            run_id=run_id,
-            idx=idx,
-            step_type="ask_user",
-            input_json={"prompt": prompt},
-        )
-        output = {"ok": True, "status": "awaiting_input", "prompt": prompt}
-        self.repo.finish_step(step["id"], output_json=output)
-        self.repo.create_event(
-            run_id,
-            "run.awaiting_input",
-            {"run_id": run_id, "step_id": step["id"], "prompt": prompt},
-        )
-        self.repo.update_run_status(run_id, "awaiting_input")
-
-    @staticmethod
-    def _build_planning_contract(task: str) -> dict[str, Any]:
-        """Build a lightweight task contract for multi-page browsing workflows."""
-        lowered = (task or "").lower()
-        is_browser_research = all(
-            token in lowered
-            for token in ["wikipedia", "navigate", "screenshot", "summar"]
-        )
-        if is_browser_research:
-            return {
-                "mode": "multi_page_research",
-                "domain": "wikipedia.org",
-                "min_unique_pages": 3,
-                "require_screenshot_per_page": True,
-                "require_summary_per_page": True,
-            }
-
-        browser_tokens = [
-            "browser",
-            "dom",
-            "page",
-            "website",
-            "site",
-            "x.com",
-            "twitter",
-            "interact",
-            "click",
-            "type",
-            "content",
-        ]
-        goal_tokens = [
-            "feedback",
-            "engage",
-            "engagement",
-            "respond",
-            "reply",
-            "comment",
-            "like",
-            "quote",
-            "post",
-            "thread",
-        ]
-        is_web_interaction_goal = any(
-            token in lowered for token in browser_tokens
-        ) and any(token in lowered for token in goal_tokens)
-        if is_web_interaction_goal:
-            return {
-                "mode": "web_interaction_feedback",
-                "require_dom_exploration": True,
-                "require_interaction": True,
-                "require_feedback_signal": True,
-                "min_exploration_steps": 1,
-                "min_interaction_steps": 1,
-                "min_feedback_signals": 1,
-            }
-
-        return {"mode": "generic"}
-
-    def _build_progress_state(
-        self,
-        history: list[dict[str, Any]],
-        planning_contract: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Summarize current progress for planning decisions."""
-        visited_urls: list[str] = []
-        screenshot_count = 0
-        summary_count = 0
-        exploration_count = 0
-        interaction_count = 0
-        feedback_signal_count = 0
-
-        for item in history:
-            if item.get("step_type") != "tool":
-                continue
-            output = dict(item.get("output") or {})
-            if not output.get("ok"):
-                continue
-            tool_input = dict(item.get("input") or {})
-            tool_name = str(tool_input.get("tool_name") or "")
-            args = dict(tool_input.get("args") or {})
-
-            if tool_name.endswith("browser_navigate"):
-                url = str(args.get("url") or "").strip()
-                if url:
-                    visited_urls.append(url)
-            if any(
-                marker in tool_name
-                for marker in [
-                    "snapshot",
-                    "evaluate",
-                    "network_requests",
-                    "console_messages",
-                ]
-            ):
-                exploration_count += 1
-            if any(
-                marker in tool_name
-                for marker in [
-                    "_click",
-                    "_type",
-                    "fill_form",
-                    "select_option",
-                    "press_key",
-                    "_drag",
-                ]
-            ):
-                interaction_count += 1
-            if any(
-                marker in tool_name
-                for marker in [
-                    "wait_for",
-                    "network_requests",
-                    "console_messages",
-                    "read_notebook_cell_output",
-                ]
-            ):
-                feedback_signal_count += 1
-            if "screenshot" in tool_name:
-                screenshot_count += 1
-            if tool_name == "store_memory":
-                metadata = dict(args.get("metadata") or {})
-                source = str(metadata.get("source") or "")
-                if source in {"analysis", "summary"}:
-                    summary_count += 1
-
-        unique_urls = sorted(set(visited_urls))
-        min_unique = int(planning_contract.get("min_unique_pages") or 0)
-        unique_pages_done = len(unique_urls)
-        mode = str(planning_contract.get("mode") or "generic")
-        if mode == "multi_page_research":
-            contract_satisfied = (
-                unique_pages_done >= min_unique
-                and screenshot_count >= max(min_unique, 1)
-                and summary_count >= max(min_unique, 1)
-            )
-        elif mode == "web_interaction_feedback":
-            contract_satisfied = (
-                exploration_count
-                >= int(planning_contract.get("min_exploration_steps") or 1)
-                and interaction_count
-                >= int(planning_contract.get("min_interaction_steps") or 1)
-                and feedback_signal_count
-                >= int(planning_contract.get("min_feedback_signals") or 1)
-            )
-        else:
-            contract_satisfied = False
-
-        consecutive_same_success = 0
-        tail_signature: str | None = None
-        for item in reversed(history):
-            if item.get("step_type") != "tool":
-                break
-            output = dict(item.get("output") or {})
-            if not output.get("ok"):
-                break
-            tool_input = dict(item.get("input") or {})
-            signature = self._tool_signature(
-                tool_name=str(tool_input.get("tool_name") or ""),
-                args=dict(tool_input.get("args") or {}),
-            )
-            if tail_signature is None:
-                tail_signature = signature
-                consecutive_same_success = 1
-                continue
-            if signature != tail_signature:
-                break
-            consecutive_same_success += 1
-
-        return {
-            "unique_urls": unique_urls,
-            "unique_pages_done": unique_pages_done,
-            "screenshot_count": screenshot_count,
-            "summary_count": summary_count,
-            "exploration_count": exploration_count,
-            "interaction_count": interaction_count,
-            "feedback_signal_count": feedback_signal_count,
-            "min_unique_pages": min_unique,
-            "consecutive_same_success": consecutive_same_success,
-            "contract_satisfied": contract_satisfied,
-        }
-
-    @staticmethod
-    def _tool_signature(*, tool_name: str, args: dict[str, Any]) -> str:
-        """Create a stable signature for repeated-action detection."""
-        return f"{tool_name}|{repr(sorted(args.items()))}"
-
     @staticmethod
     def _action_preview(action: dict[str, Any]) -> dict[str, Any]:
         """Return a compact action summary suitable for timeline events."""
@@ -656,20 +418,6 @@ class Orchestrator:
             payload["checks"] = list(action.get("checks") or [])
             return payload
         return payload
-
-    @staticmethod
-    def _should_pause_for_repetition(
-        *, planning_contract: dict[str, Any], progress_state: dict[str, Any]
-    ) -> bool:
-        """Backup guard: pause only in strict repetitive loops with no progress."""
-        if planning_contract.get("mode") not in {
-            "multi_page_research",
-            "web_interaction_feedback",
-        }:
-            return False
-        if bool(progress_state.get("contract_satisfied")):
-            return False
-        return int(progress_state.get("consecutive_same_success") or 0) >= 6
 
     def _execute_tool_with_retries(
         self,

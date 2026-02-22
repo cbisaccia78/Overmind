@@ -27,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 from .db import init_db, resolve_db_path
 from .deterministic_policy import DeterministicPolicy
+from .model_driven_policy import ModelDrivenPolicy
 from .mcp_local import LocalMcpServerConfig
 from .memory import LocalVectorMemory
 from .model_gateway import ModelGateway
@@ -102,7 +103,7 @@ class AppState:
             self.repo,
             openai_tools_provider=self.gateway.list_openai_tools_with_aliases,
         )
-        self.policy = policy or DeterministicPolicy(model_gateway=self.model_gateway)
+        self.policy = policy or ModelDrivenPolicy(model_gateway=self.model_gateway)
         self.orchestrator = Orchestrator(
             repo=self.repo,
             tool_gateway=self.gateway,
