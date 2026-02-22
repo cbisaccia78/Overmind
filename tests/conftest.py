@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import AppState, app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests deterministic by default.
+
+    Many modules switch behavior when OPENAI_API_KEY is set (model planning,
+    embeddings). For unit/integration tests we default to local/deterministic
+    behavior unless explicitly opted in.
+    """
+    if os.getenv("OVERMIND_TEST_KEEP_OPENAI") == "1":
+        return
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OVERMIND_EMBEDDING_PROVIDER", raising=False)
 
 
 @pytest.fixture

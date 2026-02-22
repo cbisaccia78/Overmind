@@ -7,7 +7,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-RunStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
+RunStatus = Literal[
+    "queued",
+    "running",
+    "awaiting_input",
+    "succeeded",
+    "failed",
+    "canceled",
+]
 
 
 class AgentCreate(BaseModel):
@@ -96,3 +103,13 @@ class ToolCallRequest(BaseModel):
 
     tool_name: str
     args: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunInputRequest(BaseModel):
+    """Request schema for supplying user input to a paused run.
+
+    Attributes:
+        message: User-provided message used to resume planning.
+    """
+
+    message: str = Field(min_length=1)

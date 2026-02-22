@@ -247,6 +247,27 @@ class Repository:
                 (status, started_at, finished_at, run_id),
             )
 
+    def append_run_task(self, run_id: str, message: str) -> None:
+        """Append additional user message text to a run task.
+
+        Args:
+            run_id: Run ID.
+            message: User-provided message to append.
+
+        Returns:
+            None.
+        """
+        run = self.get_run(run_id)
+        if not run:
+            return
+        existing = str(run.get("task") or "").rstrip()
+        addition = str(message).strip()
+        if not addition:
+            return
+        updated = f"{existing}\n\nUser input: {addition}" if existing else addition
+        with get_conn(self.db_path) as conn:
+            conn.execute("UPDATE runs SET task=? WHERE id=?", (updated, run_id))
+
     def create_step(
         self,
         run_id: str,

@@ -79,6 +79,44 @@ def test_run_collection_endpoints_and_cancel_flow(client):
     assert cancel_missing.status_code == 404
 
 
+def test_run_input_endpoint_branches(client):
+    missing = client.post("/api/runs/missing/input", json={"message": "hello"})
+    assert missing.status_code == 404
+
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "input-agent",
+            "role": "ops",
+            "model": "stub-v1",
+            "tools_allowed": ["store_memory"],
+        },
+    ).json()
+    run = client.post(
+        "/api/runs",
+        json={"agent_id": agent["id"], "task": "remember:notes:hello", "step_limit": 4},
+    ).json()
+
+    not_waiting = client.post(
+        f"/api/runs/{run['id']}/input",
+        json={"message": "extra context"},
+    )
+    assert not_waiting.status_code == 409
+
+    paused = client.app.state.services.repo.create_run(
+        agent_id=agent["id"],
+        task="curl and analyze",
+        step_limit=8,
+    )
+    client.app.state.services.repo.update_run_status(paused["id"], "awaiting_input")
+    accepted = client.post(
+        f"/api/runs/{paused['id']}/input",
+        json={"message": "https://example.com"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] in {"running", "succeeded", "failed"}
+
+
 def test_call_tool_agent_missing_branch(client, monkeypatch):
     agent = client.post(
         "/api/agents",

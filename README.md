@@ -148,6 +148,7 @@ Runs:
 - `GET /api/runs`
 - `GET /api/runs/{id}`
 - `POST /api/runs/{id}/cancel`
+- `POST /api/runs/{id}/input`
 - `GET /api/runs/{id}/steps`
 - `GET /api/runs/{id}/tool-calls`
 - `GET /api/runs/{id}/events`

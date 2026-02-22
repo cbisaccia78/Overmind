@@ -35,6 +35,7 @@ class ToolGateway:
         "write_file": "Write UTF-8 text content to a file in the workspace.",
         "store_memory": "Store a memory item in a named collection.",
         "search_memory": "Search memory items in a named collection.",
+        "final_answer": "Finish the run by returning a final answer message (no side effects).",
     }
 
     def __init__(
@@ -140,6 +141,13 @@ class ToolGateway:
                     },
                 },
                 handler=self._handle_search_memory,
+            ),
+            "final_answer": ToolSpec(
+                name="final_answer",
+                args_schema={
+                    "message": {"type": str, "required": True, "min_length": 1},
+                },
+                handler=self._handle_final_answer,
             ),
         }
 
@@ -507,3 +515,7 @@ class ToolGateway:
             top_k=args["top_k"],
         )
         return {"ok": True, "results": results}
+
+    @staticmethod
+    def _handle_final_answer(args: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True, "message": str(args["message"]) }

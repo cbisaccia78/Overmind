@@ -128,7 +128,11 @@ class ModelGateway:
             True when an OpenAI API key is configured and at least one tool is
             available to expose.
         """
-        return bool(os.getenv("OPENAI_API_KEY") and allowed_tools)
+        return bool(
+            os.getenv("OPENAI_API_KEY")
+            and allowed_tools
+            and self.openai_tools_provider is not None
+        )
 
     def _infer_with_openai(
         self,

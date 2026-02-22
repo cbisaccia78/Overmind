@@ -37,6 +37,7 @@ from .schemas import (
     MemorySearchRequest,
     MemoryStoreRequest,
     RunCreate,
+    RunInputRequest,
     ToolCallRequest,
 )
 from .tool_gateway import ToolGateway
@@ -52,6 +53,7 @@ AVAILABLE_TOOLS = [
     "write_file",
     "store_memory",
     "search_memory",
+    "final_answer",
 ]
 
 
@@ -348,6 +350,37 @@ def cancel_run(run_id: str) -> dict[str, Any]:
     repo.update_run_status(run_id, "canceled")
     repo.create_event(run_id, "run.canceled", {"run_id": run_id})
     return repo.get_run(run_id)  # type: ignore[return-value]
+
+
+@app.post("/api/runs/{run_id}/input")
+def provide_run_input(run_id: str, payload: RunInputRequest) -> dict[str, Any]:
+    """Provide user input for a run paused in awaiting_input state.
+
+    Args:
+        run_id: Run ID.
+        payload: User input payload.
+
+    Returns:
+        Updated run row.
+
+    Raises:
+        HTTPException: If the run does not exist or is not awaiting input.
+    """
+    repo = _services().repo
+    run = repo.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") != "awaiting_input":
+        raise HTTPException(status_code=409, detail="Run is not awaiting input")
+
+    repo.append_run_task(run_id, payload.message)
+    repo.create_event(run_id, "run.input_received", {"run_id": run_id})
+    repo.update_run_status(run_id, "running")
+    _services().orchestrator.launch(run_id)
+    updated = repo.get_run(run_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return updated
 
 
 @app.get("/api/runs/{run_id}/steps")
