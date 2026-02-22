@@ -85,10 +85,32 @@ class Orchestrator:
                 keep_resources = self._process_run_iterative(run_id)
             else:
                 keep_resources = self._process_run_legacy(run_id)
+        except Exception as exc:  # noqa: BLE001
+            self._mark_unexpected_failure(run_id, exc)
         finally:
             releaser = getattr(self.tool_gateway, "release_run_resources", None)
             if callable(releaser) and not keep_resources:
                 releaser(run_id)
+
+    def _mark_unexpected_failure(self, run_id: str, exc: Exception) -> None:
+        """Record unexpected orchestrator exceptions and fail active runs."""
+        run = self.repo.get_run(run_id)
+        if not run:
+            return
+        status = str(run.get("status") or "")
+        if status not in {"succeeded", "failed", "canceled", "awaiting_input"}:
+            self.repo.update_run_status(run_id, "failed")
+        self.repo.create_event(
+            run_id,
+            "run.failed",
+            {
+                "run_id": run_id,
+                "error": {
+                    "code": "orchestrator_exception",
+                    "message": str(exc),
+                },
+            },
+        )
 
     def _process_run_iterative(self, run_id: str) -> bool:
         """Process a run via iterative next-action planning.

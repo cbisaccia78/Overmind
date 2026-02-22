@@ -215,6 +215,41 @@ def test_next_action_after_non_tool_step_still_delegates_to_model():
     assert "ask_user" in gateway.calls[0]["task"]
 
 
+def test_next_action_prompt_prioritizes_latest_user_input():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "read_file",
+                "args": {"path": "notes.txt"},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        (
+            "navigate to X.com and wait for next steps.\n\n"
+            "User input: check the home feed\n\n"
+            "User input: write a snarky reply to a popular post"
+        ),
+        agent={"tools_allowed": ["read_file"]},
+        context={"run_id": "r1"},
+        history=[],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "read_file",
+        "args": {"path": "notes.txt"},
+    }
+    prompt = gateway.calls[0]["task"]
+    assert "Task context:" in prompt
+    assert "Latest user input (highest priority):" in prompt
+    assert "write a snarky reply to a popular post" in prompt
+    assert "Prior user inputs:" in prompt
+
+
 def test_action_from_inference_maps_ask_user_and_final_answer():
     ask = ModelDrivenPolicy._action_from_inference(
         {"tool_name": "ask_user", "args": {"message": "Need input"}}
@@ -261,7 +296,7 @@ def test_render_recent_history_includes_tools_and_statuses():
             },
             {
                 "step_type": "tool",
-                "input": {"tool_name": "b"},
+                "input": {"tool_name": "b", "args": {"url": "https://x.com"}},
                 "output": {"ok": False},
             },
             {
@@ -273,6 +308,6 @@ def test_render_recent_history_includes_tools_and_statuses():
     )
 
     assert "tool a -> ok" in rendered
-    assert "tool b -> failed" in rendered
+    assert 'tool b args={"url":"https://x.com"} -> failed' in rendered
     assert "verify -> ok" in rendered
     assert "ask_user" in rendered

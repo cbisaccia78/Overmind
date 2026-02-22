@@ -107,6 +107,47 @@ def test_orchestrator_releases_resources_for_terminal_runs():
     gateway.release_run_resources.assert_called_once_with("r-done")
 
 
+def test_orchestrator_marks_run_failed_on_unexpected_exception():
+    class _BoomPolicy:
+        def next_action(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    repo = MagicMock()
+    repo.get_run.side_effect = [
+        {
+            "id": "r-boom",
+            "status": "queued",
+            "agent_id": "a-boom",
+            "task": "do work",
+            "step_limit": 5,
+        },
+        {"id": "r-boom", "status": "running"},
+        {"id": "r-boom", "status": "running"},
+    ]
+    repo.get_agent.return_value = {
+        "id": "a-boom",
+        "status": "active",
+        "tools_allowed": [],
+    }
+    repo.list_steps.return_value = []
+    repo.create_step.side_effect = [{"id": "s-plan"}]
+
+    gateway = MagicMock()
+    orch = _orchestrator_with(repo, gateway, _BoomPolicy())
+    orch.process_run("r-boom")
+
+    repo.update_run_status.assert_any_call("r-boom", "failed")
+    repo.create_event.assert_any_call(
+        "r-boom",
+        "run.failed",
+        {
+            "run_id": "r-boom",
+            "error": {"code": "orchestrator_exception", "message": "boom"},
+        },
+    )
+    gateway.release_run_resources.assert_called_once_with("r-boom")
+
+
 def test_orchestrator_fails_when_agent_missing_or_disabled():
     repo_missing = MagicMock()
     repo_missing.get_run.return_value = {

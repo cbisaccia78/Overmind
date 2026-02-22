@@ -6,6 +6,8 @@ not apply task-specific keyword contracts inside the execution loop.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from .model_gateway import ModelGateway
@@ -165,17 +167,19 @@ class ModelDrivenPolicy(Policy):
     def _build_initial_prompt(
         *, task: str, history: list[dict[str, Any]] | None = None
     ) -> str:
+        task_block = ModelDrivenPolicy._render_task_context(task)
         recent = ModelDrivenPolicy._render_recent_history(history or [])
+        contract = ModelDrivenPolicy._decision_contract()
         if recent:
             return (
-                f"Task: {task.strip()}\n\n"
+                f"{task_block}\n\n"
                 "Recent run history:\n"
                 f"{recent}\n\n"
-                "Decide the next action. Choose exactly one of: tool call, ask_user, or final_answer."
+                f"{contract}"
             )
         return (
-            f"Task: {task.strip()}\n\n"
-            "Decide the next action. Choose exactly one of: tool call, ask_user, or final_answer."
+            f"{task_block}\n\n"
+            f"{contract}"
         )
 
     @staticmethod
@@ -186,15 +190,17 @@ class ModelDrivenPolicy(Policy):
         last_tool_summary: str,
         history: list[dict[str, Any]],
     ) -> str:
+        task_block = ModelDrivenPolicy._render_task_context(task)
         recent = ModelDrivenPolicy._render_recent_history(history)
+        contract = ModelDrivenPolicy._decision_contract()
         return (
-            f"Task: {task.strip()}\n\n"
+            f"{task_block}\n\n"
             f"Last tool: {last_tool_name or 'none'}\n"
             "Last tool result summary:\n"
             f"{last_tool_summary or 'none'}\n\n"
             "Recent run history:\n"
             f"{recent or 'none'}\n\n"
-            "Decide the next action. Choose exactly one of: tool call, ask_user, or final_answer."
+            f"{contract}"
         )
 
     @staticmethod
@@ -293,14 +299,16 @@ class ModelDrivenPolicy(Policy):
         error_message: str,
         failure_memory: list[dict[str, Any]],
     ) -> str:
+        task_block = ModelDrivenPolicy._render_task_context(task)
+        contract = ModelDrivenPolicy._decision_contract()
         return (
-            f"Task: {task.strip()}\n\n"
+            f"{task_block}\n\n"
             "Prior failures:\n"
             f"{failure_memory}\n\n"
             "Most recent failure:\n"
             f"tool={last_tool_name} args={last_args} error={error_message}\n\n"
-            "Choose the next action. Prefer a different approach that can still complete the task. "
-            "Choose exactly one of: tool call, ask_user, or final_answer."
+            "Choose the next action. Prefer a different approach that can still complete the task.\n\n"
+            f"{contract}"
         )
 
     @staticmethod
@@ -312,8 +320,13 @@ class ModelDrivenPolicy(Policy):
                 tool_input = dict(item.get("input") or {})
                 output = dict(item.get("output") or {})
                 tool_name = str(tool_input.get("tool_name") or "")
+                args = dict(tool_input.get("args") or {})
                 status = "ok" if output.get("ok") else "failed"
-                lines.append(f"tool {tool_name} -> {status}")
+                args_text = ModelDrivenPolicy._compact_args(args)
+                if args_text:
+                    lines.append(f"tool {tool_name} args={args_text} -> {status}")
+                else:
+                    lines.append(f"tool {tool_name} -> {status}")
                 continue
             if step_type == "ask_user":
                 lines.append("ask_user")
@@ -326,3 +339,59 @@ class ModelDrivenPolicy(Policy):
             if step_type == "eval":
                 lines.append("eval")
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _render_task_context(task: str) -> str:
+        original_task, user_inputs = ModelDrivenPolicy._split_task_and_user_inputs(task)
+        if not user_inputs:
+            return f"Task: {original_task}"
+
+        latest_input = user_inputs[-1]
+        older_inputs = user_inputs[:-1]
+        sections = [f"Original task:\n{original_task}"]
+        if older_inputs:
+            recent_older = older_inputs[-2:]
+            bullets = "\n".join(f"- {item}" for item in recent_older)
+            sections.append(f"Prior user inputs:\n{bullets}")
+        sections.append(f"Latest user input (highest priority):\n{latest_input}")
+        return "Task context:\n" + "\n\n".join(sections)
+
+    @staticmethod
+    def _decision_contract() -> str:
+        return (
+            "Decide the next action. Choose exactly one of: tool call, ask_user, or final_answer.\n"
+            "Prioritize progress toward the latest user input.\n"
+            "Avoid repeating the same successful action with identical arguments unless it is necessary."
+        )
+
+    @staticmethod
+    def _split_task_and_user_inputs(task: str) -> tuple[str, list[str]]:
+        raw = str(task or "").strip()
+        if not raw:
+            return "", []
+
+        markers = list(re.finditer(r"(?:^|\n\n)User input:\s*", raw, flags=re.IGNORECASE))
+        if not markers:
+            return raw, []
+
+        base_end = markers[0].start()
+        base_task = raw[:base_end].strip()
+        messages: list[str] = []
+        for idx, marker in enumerate(markers):
+            start = marker.end()
+            end = markers[idx + 1].start() if idx + 1 < len(markers) else len(raw)
+            message = raw[start:end].strip()
+            if message:
+                messages.append(message)
+        if not base_task:
+            base_task = messages[0] if messages else raw
+        return base_task, messages
+
+    @staticmethod
+    def _compact_args(args: dict[str, Any], max_len: int = 140) -> str:
+        if not args:
+            return ""
+        rendered = json.dumps(args, sort_keys=True, separators=(",", ":"))
+        if len(rendered) <= max_len:
+            return rendered
+        return rendered[:max_len] + "..."
