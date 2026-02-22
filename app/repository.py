@@ -158,6 +158,51 @@ class Repository:
         """
         return self.update_agent(agent_id, {"status": "disabled"})
 
+    def get_setting(self, key: str) -> str | None:
+        """Fetch a single app setting value.
+
+        Args:
+            key: Setting key.
+
+        Returns:
+            Stored string value, or None when missing.
+        """
+        with get_conn(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+        if not row:
+            return None
+        value = row.get("value")
+        return str(value) if value is not None else None
+
+    def set_setting(self, key: str, value: str | None) -> None:
+        """Create or update an app setting.
+
+        Passing `None` deletes the setting.
+
+        Args:
+            key: Setting key.
+            value: Setting value, or None to delete.
+
+        Returns:
+            None.
+        """
+        with get_conn(self.db_path) as conn:
+            if value is None:
+                conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+                return
+            conn.execute(
+                """
+                INSERT INTO app_settings(key, value, updated_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, value, utc_now()),
+            )
+
     def create_run(
         self, agent_id: str, task: str, step_limit: int = 8
     ) -> dict[str, Any]:

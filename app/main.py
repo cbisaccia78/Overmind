@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
@@ -89,6 +91,11 @@ class AppState:
         workspace = str(Path(workspace_root or WORKSPACE_ROOT).resolve())
 
         self.repo = Repository(db_path)
+
+        stored_openai_key = self.repo.get_setting("openai_api_key")
+        if stored_openai_key and not os.getenv("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = stored_openai_key
+
         self.memory = LocalVectorMemory(self.repo)
         self.shell_runner = ShellRunner(workspace_root=workspace)
         self.gateway = ToolGateway(
@@ -144,6 +151,36 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 def _services() -> AppState:
     """Return the singleton `AppState` stored on the FastAPI app."""
     return app.state.services
+
+
+def _mask_openai_key(key: str | None) -> str:
+    """Return a masked display value for API keys."""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return f"{key[:4]}...{key[-4:]}"
+
+
+def _test_openai_key(api_key: str) -> tuple[bool, str]:
+    """Validate OpenAI key by calling the models endpoint."""
+    endpoint = os.getenv(
+        "OVERMIND_OPENAI_MODELS_URL", "https://api.openai.com/v1/models"
+    )
+    req = urlrequest.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="GET",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=10):
+            return True, "OpenAI key is valid."
+    except urlerror.HTTPError as exc:
+        return False, f"OpenAI key test failed: HTTP {exc.code}"
+    except (urlerror.URLError, TimeoutError) as exc:
+        return False, f"OpenAI key test failed: {exc}"
 
 
 async def _parse_urlencoded_form(request: Request) -> dict[str, str]:
@@ -547,6 +584,19 @@ def search_memory(payload: MemorySearchRequest) -> dict[str, Any]:
     return {"ok": True, "results": results}
 
 
+@app.get("/api/settings/openai-key")
+def get_openai_key_status() -> dict[str, Any]:
+    """Return whether an OpenAI API key is configured."""
+    stored = _services().repo.get_setting("openai_api_key")
+    active = os.getenv("OPENAI_API_KEY")
+    key = active or stored
+    return {
+        "ok": True,
+        "configured": bool(key),
+        "masked": _mask_openai_key(key),
+    }
+
+
 # Basic UI
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
@@ -806,6 +856,74 @@ def run_detail_page(run_id: str, request: Request) -> HTMLResponse:
             "model_calls": repo.list_model_calls(run_id),
             "events": repo.list_events(run_id),
         },
+    )
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    """Render application settings page."""
+    status = get_openai_key_status()
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "openai_configured": status["configured"],
+            "openai_masked": status["masked"],
+            "settings_error": None,
+            "settings_message": None,
+        },
+    )
+
+
+@app.post("/settings/openai", response_class=HTMLResponse)
+async def settings_openai_form(request: Request) -> HTMLResponse:
+    """Handle OpenAI key save/clear/test actions from settings page."""
+    form = await _parse_urlencoded_form(request)
+    action = (form.get("action") or "save").strip().lower()
+    key_input = (form.get("openai_api_key") or "").strip()
+    repo = _services().repo
+
+    stored = repo.get_setting("openai_api_key")
+    active = os.getenv("OPENAI_API_KEY")
+    effective_key = key_input or active or stored
+
+    settings_error: str | None = None
+    settings_message: str | None = None
+
+    if action == "test":
+        if not effective_key:
+            settings_error = "No OpenAI API key is configured."
+        else:
+            ok, message = _test_openai_key(effective_key)
+            if ok:
+                settings_message = message
+            else:
+                settings_error = message
+    elif action == "clear":
+        repo.set_setting("openai_api_key", None)
+        os.environ.pop("OPENAI_API_KEY", None)
+        _services().memory.reload_backend()
+        settings_message = "OpenAI API key removed."
+    else:
+        if not key_input:
+            settings_error = "OpenAI API key is required to save."
+        else:
+            repo.set_setting("openai_api_key", key_input)
+            os.environ["OPENAI_API_KEY"] = key_input
+            _services().memory.reload_backend()
+            settings_message = "OpenAI API key saved."
+
+    status = get_openai_key_status()
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "openai_configured": status["configured"],
+            "openai_masked": status["masked"],
+            "settings_error": settings_error,
+            "settings_message": settings_message,
+        },
+        status_code=422 if settings_error else 200,
     )
 
 

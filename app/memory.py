@@ -30,6 +30,10 @@ class LocalVectorMemory:
         """Embed text via the configured embedding backend."""
         return self.backend.embed(text)
 
+    def reload_backend(self) -> None:
+        """Reload embedding backend from current environment configuration."""
+        self.backend = _select_backend()
+
     @staticmethod
     def _cosine(a: list[float], b: list[float]) -> float:
         """Compute cosine similarity for already-normalized vectors.

@@ -25,6 +25,20 @@ The easiest way to use overmind is to download the latest release from the GitHu
   sudo apt install ./overmind-desktop_<version>_amd64.deb
   ```
 
+We currently only support Linux, so if you're on mac/windows you need to set up a linux VM.
+
+## Configure OpenAI Key (Desktop App)
+
+You can set your OpenAI key directly in the app:
+
+1. Open Overmind.
+2. Go to **Settings**.
+3. Paste your key into **OpenAI API Key**.
+4. Click **Save Key**.
+5. (Optional) Click **Test Key** to verify it works.
+
+This key is saved in Overmind app settings and is loaded automatically when you launch the app from the desktop icon.
+
 ## Run from Source (Development)
 
 ```bash

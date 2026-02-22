@@ -196,6 +196,12 @@ def init_db(db_path: str) -> None:
       FOREIGN KEY(run_id) REFERENCES runs(id)
     );
 
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
     CREATE INDEX IF NOT EXISTS idx_steps_run_idx ON steps(run_id, idx);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
