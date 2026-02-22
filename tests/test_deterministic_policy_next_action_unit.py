@@ -250,6 +250,210 @@ def test_next_action_prompt_prioritizes_latest_user_input():
     assert "Prior user inputs:" in prompt
 
 
+def test_next_action_stall_recovery_prompt_forbids_repeating_identical_action():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_click",
+                "args": {"element": "Reply"},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "navigate to X.com and start posting",
+        agent={
+            "tools_allowed": [
+                "mcp.playwright.browser_snapshot",
+                "mcp.playwright.browser_click",
+            ]
+        },
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True, "mcp": {"result": {"content": ["snap1"]}}},
+            },
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True, "mcp": {"result": {"content": ["snap2"]}}},
+            },
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True, "mcp": {"result": {"content": ["snap3"]}}},
+            },
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_click",
+        "args": {"element": "Reply"},
+    }
+    prompt = gateway.calls[0]["task"]
+    assert "Stall detected:" in prompt
+    assert "Stall recovery constraint (next turn only):" in prompt
+    assert "Pattern observed across the last 3 successful tool actions." in prompt
+    assert (
+        "Do not call any of these tools in your next action: "
+        "`mcp.playwright.browser_snapshot`." in prompt
+    )
+
+
+def test_next_action_reprompts_once_when_model_violates_stall_constraint():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_snapshot",
+                "args": {},
+            },
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_click",
+                "args": {"element": "Reply"},
+            },
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "navigate to X.com and start posting",
+        agent={
+            "tools_allowed": [
+                "mcp.playwright.browser_snapshot",
+                "mcp.playwright.browser_click",
+            ]
+        },
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True},
+            },
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True},
+            },
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True},
+            },
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_click",
+        "args": {"element": "Reply"},
+    }
+    assert len(gateway.calls) == 2
+    assert "Stall recovery constraint (next turn only):" in gateway.calls[0]["task"]
+    assert "Stall recovery violation:" in gateway.calls[1]["task"]
+
+
+def test_next_action_stall_recovery_blocks_two_tool_cycle():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_run_code",
+                "args": {"code": "return 1;"},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    history = []
+    for tool_name in [
+        "mcp.playwright.browser_snapshot",
+        "mcp.playwright.browser_navigate",
+        "mcp.playwright.browser_snapshot",
+        "mcp.playwright.browser_navigate",
+        "mcp.playwright.browser_snapshot",
+        "mcp.playwright.browser_navigate",
+    ]:
+        args = {} if tool_name.endswith("snapshot") else {"url": "https://x.com"}
+        history.append(
+            {
+                "step_type": "tool",
+                "input": {"tool_name": tool_name, "args": args},
+                "output": {"ok": True},
+            }
+        )
+
+    action = policy.next_action(
+        "navigate to X.com and start posting",
+        agent={
+            "tools_allowed": [
+                "mcp.playwright.browser_snapshot",
+                "mcp.playwright.browser_navigate",
+                "mcp.playwright.browser_run_code",
+            ]
+        },
+        context={"run_id": "r1"},
+        history=history,
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_run_code",
+        "args": {"code": "return 1;"},
+    }
+    prompt = gateway.calls[0]["task"]
+    assert "two-tool loop in recent actions" in prompt
+    assert "`mcp.playwright.browser_navigate`" in prompt
+    assert "`mcp.playwright.browser_snapshot`" in prompt
+
+
+def test_next_action_does_not_trigger_stall_prompt_before_threshold():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "mcp.playwright.browser_snapshot",
+                "args": {},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    action = policy.next_action(
+        "navigate to X.com and inspect page",
+        agent={"tools_allowed": ["mcp.playwright.browser_snapshot"]},
+        context={"run_id": "r1"},
+        history=[
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True},
+            },
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True},
+            },
+        ],
+    )
+
+    assert action == {
+        "kind": "tool_call",
+        "tool_name": "mcp.playwright.browser_snapshot",
+        "args": {},
+    }
+    prompt = gateway.calls[0]["task"]
+    assert "Stall detected:" not in prompt
+    assert "Last tool: mcp.playwright.browser_snapshot" in prompt
+
+
 def test_action_from_inference_maps_ask_user_and_final_answer():
     ask = ModelDrivenPolicy._action_from_inference(
         {"tool_name": "ask_user", "args": {"message": "Need input"}}

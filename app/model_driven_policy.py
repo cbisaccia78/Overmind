@@ -126,6 +126,37 @@ class ModelDrivenPolicy(Policy):
                     context=context,
                 )
 
+            stall = self._detect_stall_repetition(history)
+            if stall is not None:
+                prompt = self._build_stall_recovery_prompt(
+                    task=task,
+                    blocked_tool_names=list(stall.get("blocked_tool_names") or []),
+                    repeats=int(stall.get("repeats") or 0),
+                    pattern_summary=str(stall.get("pattern_summary") or ""),
+                    last_tool_name=last_tool_name,
+                    last_tool_summary=self._summarize_tool_output(output),
+                    history=history,
+                )
+                action = self._infer_next_action(
+                    prompt=prompt,
+                    agent=agent,
+                    context=context,
+                )
+                blocked_tools = set(stall.get("blocked_tool_names") or [])
+                if self._violates_stall_constraint(action, blocked_tools):
+                    violation_prompt = self._build_stall_violation_prompt(
+                        task=task,
+                        blocked_tool_names=sorted(blocked_tools),
+                        attempted_action=action,
+                        history=history,
+                    )
+                    return self._infer_next_action(
+                        prompt=violation_prompt,
+                        agent=agent,
+                        context=context,
+                    )
+                return action
+
             prompt = self._build_followup_prompt(
                 task=task,
                 last_tool_name=last_tool_name,
@@ -202,6 +233,76 @@ class ModelDrivenPolicy(Policy):
             f"{recent or 'none'}\n\n"
             f"{contract}"
         )
+
+    @staticmethod
+    def _build_stall_recovery_prompt(
+        *,
+        task: str,
+        blocked_tool_names: list[str],
+        repeats: int,
+        pattern_summary: str,
+        last_tool_name: str,
+        last_tool_summary: str,
+        history: list[dict[str, Any]],
+    ) -> str:
+        task_block = ModelDrivenPolicy._render_task_context(task)
+        recent = ModelDrivenPolicy._render_recent_history(history)
+        contract = ModelDrivenPolicy._decision_contract()
+        blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        return (
+            f"{task_block}\n\n"
+            "Stall detected:\n"
+            f"- Pattern observed across the last {repeats} successful tool actions.\n"
+            f"- Pattern summary: {pattern_summary or 'repeated low-progress actions'}\n\n"
+            "Stall recovery constraint (next turn only):\n"
+            f"- Do not call any of these tools in your next action: {blocked}.\n"
+            "- Choose a different tool/arguments, or ask_user/final_answer if no safe progress is possible.\n\n"
+            f"Last tool: {last_tool_name or 'none'}\n"
+            "Last tool result summary:\n"
+            f"{last_tool_summary or 'none'}\n\n"
+            "Recent run history:\n"
+            f"{recent or 'none'}\n\n"
+            f"{contract}"
+        )
+
+    @staticmethod
+    def _build_stall_violation_prompt(
+        *,
+        task: str,
+        blocked_tool_names: list[str],
+        attempted_action: dict[str, Any],
+        history: list[dict[str, Any]],
+    ) -> str:
+        task_block = ModelDrivenPolicy._render_task_context(task)
+        recent = ModelDrivenPolicy._render_recent_history(history)
+        contract = ModelDrivenPolicy._decision_contract()
+        attempted_kind = str(attempted_action.get("kind") or "")
+        attempted_tool = str(attempted_action.get("tool_name") or "")
+        attempted_args = ModelDrivenPolicy._compact_args(
+            dict(attempted_action.get("args") or {})
+        )
+        blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        return (
+            f"{task_block}\n\n"
+            "Stall recovery violation:\n"
+            "Your previous choice violated the stall recovery constraint.\n"
+            f"Attempted action: kind={attempted_kind} tool={attempted_tool} args={attempted_args or '{}'}\n\n"
+            "Constraint (this turn):\n"
+            f"- Do not call any of these tools: {blocked}.\n"
+            "- Choose a different tool/arguments now, or ask_user/final_answer if no safe progress is possible.\n\n"
+            "Recent run history:\n"
+            f"{recent or 'none'}\n\n"
+            f"{contract}"
+        )
+
+    @staticmethod
+    def _violates_stall_constraint(
+        action: dict[str, Any], blocked_tool_names: set[str]
+    ) -> bool:
+        if str(action.get("kind") or "") != "tool_call":
+            return False
+        tool_name = str(action.get("tool_name") or "")
+        return bool(tool_name and tool_name in blocked_tool_names)
 
     @staticmethod
     def _should_ask_user_on_inference_error(message: str) -> bool:
@@ -289,6 +390,59 @@ class ModelDrivenPolicy(Policy):
                 }
             )
         return failures[-5:]
+
+    @staticmethod
+    def _detect_stall_repetition(
+        history: list[dict[str, Any]], min_repeats: int = 3
+    ) -> dict[str, Any] | None:
+        """Detect repeated successful tool patterns at the history tail."""
+        trailing: list[dict[str, Any]] = []
+        for item in reversed(history):
+            if str(item.get("step_type") or "") != "tool":
+                break
+            output = dict(item.get("output") or {})
+            if not output.get("ok"):
+                break
+            trailing.append(item)
+        trailing.reverse()
+        if len(trailing) < min_repeats:
+            return None
+
+        # Case 1: identical tool name repeated, even if args vary.
+        last_tool = str(dict(trailing[-1].get("input") or {}).get("tool_name") or "")
+        if last_tool:
+            same_tool_count = 0
+            for item in reversed(trailing):
+                tool_name = str(dict(item.get("input") or {}).get("tool_name") or "")
+                if tool_name != last_tool:
+                    break
+                same_tool_count += 1
+            if same_tool_count >= min_repeats:
+                return {
+                    "blocked_tool_names": [last_tool],
+                    "repeats": same_tool_count,
+                    "pattern_summary": (
+                        f"tool `{last_tool}` repeated {same_tool_count} times in a row"
+                    ),
+                }
+
+        # Case 2: two-tool loop near the tail (e.g., snapshot/navigate oscillation).
+        window = trailing[-6:] if len(trailing) >= 6 else trailing
+        tool_names = [
+            str(dict(item.get("input") or {}).get("tool_name") or "") for item in window
+        ]
+        unique = sorted({name for name in tool_names if name})
+        if len(unique) == 2 and len(tool_names) >= 6:
+            counts = {name: tool_names.count(name) for name in unique}
+            if all(count >= 2 for count in counts.values()):
+                counts_text = ", ".join(f"`{name}` x{counts[name]}" for name in unique)
+                return {
+                    "blocked_tool_names": unique,
+                    "repeats": len(tool_names),
+                    "pattern_summary": f"two-tool loop in recent actions ({counts_text})",
+                }
+
+        return None
 
     @staticmethod
     def _build_failure_replan_prompt(
