@@ -85,6 +85,8 @@ class ModelGateway:
                     task=task,
                     model=model,
                     allowed_tools=allowed_tools,
+                    context=context,
+                    include_meta=True,
                 )
             elif model_name.startswith("deepseek"):
                 response_json = self._infer_with_model(task=task, model=model)
@@ -93,6 +95,8 @@ class ModelGateway:
                     task=task,
                     model=model,
                     allowed_tools=allowed_tools,
+                    context=context,
+                    include_meta=True,
                 )
             else:
                 response_json = self._infer_with_model(task=task, model=model)
@@ -164,6 +168,7 @@ class ModelGateway:
             if model_name.startswith("deepseek") and os.getenv("DEEPSEEK_API_KEY"):
                 raw = self._advise_with_openai_compatible(
                     model=model,
+                    provider="deepseek",
                     api_key=os.getenv("DEEPSEEK_API_KEY") or "",
                     endpoint=os.getenv(
                         "OVERMIND_DEEPSEEK_CHAT_COMPLETIONS_URL",
@@ -175,6 +180,7 @@ class ModelGateway:
             elif os.getenv("OPENAI_API_KEY"):
                 raw = self._advise_with_openai_compatible(
                     model=model,
+                    provider="openai",
                     api_key=os.getenv("OPENAI_API_KEY") or "",
                     endpoint=os.getenv(
                         "OVERMIND_OPENAI_CHAT_COMPLETIONS_URL",
@@ -248,6 +254,7 @@ class ModelGateway:
         self,
         *,
         model: str,
+        provider: str,
         api_key: str,
         endpoint: str,
         task: str,
@@ -266,13 +273,28 @@ class ModelGateway:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
-        data = self._request_openai_chat_completion(
+        payload, used_reasoning = self._apply_reasoning_request_tuning(
             payload=payload,
-            api_key=api_key,
-            endpoint=endpoint,
-            timeout_s=timeout_s,
+            model=model,
+            provider=provider,
         )
+        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        try:
+            data = self._request_openai_chat_completion(
+                payload=payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        except RuntimeError:
+            if not used_reasoning:
+                raise
+            data = self._request_openai_chat_completion(
+                payload=self._strip_reasoning_request_tuning(payload),
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
         return self._parse_supervisor_json_response(data)
 
     @staticmethod
@@ -479,6 +501,8 @@ class ModelGateway:
         task: str,
         model: str,
         allowed_tools: list[str],
+        context: dict[str, Any] | None = None,
+        include_meta: bool = False,
     ) -> dict[str, Any]:
         """Infer a tool call via OpenAI-compatible chat-completions."""
         api_key = os.getenv("OPENAI_API_KEY")
@@ -491,9 +515,12 @@ class ModelGateway:
         return self._infer_with_openai_compatible(
             task=task,
             model=model,
+            provider="openai",
             allowed_tools=allowed_tools,
             api_key=api_key,
             endpoint=endpoint,
+            context=context,
+            include_meta=include_meta,
         )
 
     def _infer_with_deepseek(
@@ -502,6 +529,8 @@ class ModelGateway:
         task: str,
         model: str,
         allowed_tools: list[str],
+        context: dict[str, Any] | None = None,
+        include_meta: bool = False,
     ) -> dict[str, Any]:
         """Infer a tool call via DeepSeek's OpenAI-compatible API."""
         api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -514,9 +543,12 @@ class ModelGateway:
         return self._infer_with_openai_compatible(
             task=task,
             model=model,
+            provider="deepseek",
             allowed_tools=allowed_tools,
             api_key=api_key,
             endpoint=endpoint,
+            context=context,
+            include_meta=include_meta,
         )
 
     def _infer_with_openai_compatible(
@@ -524,31 +556,54 @@ class ModelGateway:
         *,
         task: str,
         model: str,
+        provider: str,
         allowed_tools: list[str],
         api_key: str,
         endpoint: str,
+        context: dict[str, Any] | None = None,
+        include_meta: bool = False,
     ) -> dict[str, Any]:
         """Infer one tool call using an OpenAI-compatible chat completions API."""
         tools, alias_map = self._get_openai_tools(allowed_tools)
         if not tools:
             raise RuntimeError("No allowed tools available for OpenAI tool calling")
+        base_messages = self._build_openai_messages(
+            task=task,
+            provider=provider,
+            context=context,
+        )
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": task}],
+            "messages": base_messages,
             "tools": tools,
             "tool_choice": "auto",
             "temperature": 0,
         }
+        payload, used_reasoning = self._apply_reasoning_request_tuning(
+            payload=payload,
+            model=model,
+            provider=provider,
+        )
 
         timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
-        data = self._request_openai_chat_completion(
-            payload=payload,
-            api_key=api_key,
-            endpoint=endpoint,
-            timeout_s=timeout_s,
-        )
         try:
-            tool_name, args = self._parse_openai_tool_call(
+            data = self._request_openai_chat_completion(
+                payload=payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        except RuntimeError:
+            if not used_reasoning:
+                raise
+            data = self._request_openai_chat_completion(
+                payload=self._strip_reasoning_request_tuning(payload),
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        try:
+            tool_name, args, raw_tool_call, message = self._parse_openai_tool_call(
                 data=data,
                 allowed_tools=allowed_tools,
                 alias_map=alias_map,
@@ -565,25 +620,47 @@ class ModelGateway:
                             "Select exactly one function call and return no plain text."
                         ),
                     },
-                    {"role": "user", "content": task},
+                    *base_messages,
                 ],
                 "tools": tools,
                 "tool_choice": "required",
                 "temperature": 0,
             }
-            retry_data = self._request_openai_chat_completion(
+            retry_payload, retry_used_reasoning = self._apply_reasoning_request_tuning(
                 payload=retry_payload,
-                api_key=api_key,
-                endpoint=endpoint,
-                timeout_s=timeout_s,
+                model=model,
+                provider=provider,
             )
-            tool_name, args = self._parse_openai_tool_call(
+            try:
+                retry_data = self._request_openai_chat_completion(
+                    payload=retry_payload,
+                    api_key=api_key,
+                    endpoint=endpoint,
+                    timeout_s=timeout_s,
+                )
+            except RuntimeError:
+                if not retry_used_reasoning:
+                    raise
+                retry_data = self._request_openai_chat_completion(
+                    payload=self._strip_reasoning_request_tuning(retry_payload),
+                    api_key=api_key,
+                    endpoint=endpoint,
+                    timeout_s=timeout_s,
+                )
+            tool_name, args, raw_tool_call, message = self._parse_openai_tool_call(
                 data=retry_data,
                 allowed_tools=allowed_tools,
                 alias_map=alias_map,
             )
-
-        return {"tool_name": tool_name, "args": args}
+        result = {"tool_name": tool_name, "args": args}
+        if include_meta:
+            result.update(
+                self._build_openai_tool_response_metadata(
+                    message=message,
+                    raw_tool_call=raw_tool_call,
+                )
+            )
+        return result
 
     @staticmethod
     def _request_openai_chat_completion(
@@ -614,7 +691,7 @@ class ModelGateway:
         data: dict[str, Any],
         allowed_tools: list[str],
         alias_map: dict[str, str],
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
         try:
             message = data["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
@@ -623,14 +700,312 @@ class ModelGateway:
             tool_name = alias_map.get(raw_tool_name, raw_tool_name)
             args_raw = first_call["function"].get("arguments") or "{}"
             args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as exc:
             raise RuntimeError("openai response missing valid tool call") from exc
 
         if tool_name not in allowed_tools:
             raise RuntimeError(f"openai selected disallowed tool '{tool_name}'")
         if not isinstance(args, dict):
             raise RuntimeError("openai tool call arguments must be an object")
-        return tool_name, args
+        return tool_name, args, dict(first_call), dict(message)
+
+    def _build_openai_messages(
+        self,
+        *,
+        task: str,
+        provider: str,
+        context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Build request messages, adding DeepSeek tool follow-up context when needed."""
+        user_message = {"role": "user", "content": task}
+        if provider != "deepseek":
+            return [user_message]
+
+        continuation = self._build_deepseek_tool_continuation_messages(context=context)
+        if continuation:
+            return [*continuation, user_message]
+        return [user_message]
+
+    def _build_deepseek_tool_continuation_messages(
+        self, *, context: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Return assistant/tool replay messages for DeepSeek reasoning follow-up calls."""
+        if self.repo is None or not isinstance(context, dict):
+            return []
+
+        run_id = str(context.get("run_id") or "").strip()
+        history = context.get("history")
+        if not run_id or not isinstance(history, list) or not history:
+            return []
+
+        last_tool_step: dict[str, Any] | None = None
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("step_type") or "") == "tool":
+                last_tool_step = item
+                break
+        if last_tool_step is None:
+            return []
+
+        last_input = dict(last_tool_step.get("input") or {})
+        last_output = dict(last_tool_step.get("output") or {})
+        last_tool_name = str(last_input.get("tool_name") or "")
+        last_args = dict(last_input.get("args") or {})
+        if not last_tool_name:
+            return []
+
+        model_calls = self.repo.list_model_calls(run_id)
+        if not model_calls:
+            return []
+        last_response = dict(model_calls[-1].get("response_json") or {})
+        if str(last_response.get("tool_name") or "") != last_tool_name:
+            return []
+
+        reasoning_content = self._extract_reasoning_text(
+            last_response.get("reasoning_content")
+        )
+        if not reasoning_content:
+            return []
+        assistant_content = self._extract_reasoning_text(
+            last_response.get("assistant_content")
+        )
+
+        normalized_tool_call = self._normalize_tool_call_for_replay(
+            raw_tool_call=last_response.get("raw_tool_call"),
+            fallback_tool_name=last_tool_name,
+            fallback_args=last_args,
+        )
+        if not normalized_tool_call:
+            return []
+
+        assistant_message = {
+            "role": "assistant",
+            "content": self._merge_reasoning_and_assistant_content(
+                reasoning_content=reasoning_content,
+                assistant_content=assistant_content,
+            ),
+            "tool_calls": [normalized_tool_call],
+        }
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": normalized_tool_call["id"],
+            "content": self._serialize_tool_output_for_model(last_output),
+        }
+        return [assistant_message, tool_message]
+
+    @staticmethod
+    def _extract_reasoning_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text
+
+    @staticmethod
+    def _merge_reasoning_and_assistant_content(
+        *, reasoning_content: str, assistant_content: str
+    ) -> str:
+        if reasoning_content and assistant_content:
+            return f"{reasoning_content}\n{assistant_content}"
+        return reasoning_content or assistant_content or ""
+
+    @staticmethod
+    def _normalize_tool_call_for_replay(
+        *,
+        raw_tool_call: Any,
+        fallback_tool_name: str,
+        fallback_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        call = dict(raw_tool_call) if isinstance(raw_tool_call, dict) else {}
+        function_payload = (
+            dict(call.get("function")) if isinstance(call.get("function"), dict) else {}
+        )
+
+        tool_name = str(function_payload.get("name") or fallback_tool_name or "").strip()
+        if not tool_name:
+            return {}
+        call_id = str(call.get("id") or "").strip()
+        if not call_id:
+            call_id = f"call_{tool_name.replace('.', '_')}"
+
+        args_payload = function_payload.get("arguments")
+        if isinstance(args_payload, str):
+            args_json = args_payload
+        else:
+            if not isinstance(args_payload, dict):
+                args_payload = fallback_args
+            args_json = json.dumps(args_payload, separators=(",", ":"), ensure_ascii=True)
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": tool_name, "arguments": args_json},
+        }
+
+    @staticmethod
+    def _serialize_tool_output_for_model(output: dict[str, Any], max_len: int = 6000) -> str:
+        try:
+            rendered = json.dumps(output, separators=(",", ":"), ensure_ascii=True)
+        except TypeError:
+            rendered = str(output)
+        if len(rendered) <= max_len:
+            return rendered
+        return rendered[:max_len] + "..."
+
+    def _build_openai_tool_response_metadata(
+        self,
+        *,
+        message: dict[str, Any],
+        raw_tool_call: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Extract provider-agnostic metadata from a tool-call completion."""
+        metadata: dict[str, Any] = {}
+        assistant_content = self._extract_assistant_content_from_message(message)
+        reasoning_content = self._extract_reasoning_content_from_message(message)
+        if assistant_content:
+            metadata["assistant_content"] = assistant_content
+        if reasoning_content:
+            metadata["reasoning_content"] = reasoning_content
+        if raw_tool_call:
+            metadata["raw_tool_call"] = dict(raw_tool_call)
+        return metadata
+
+    @staticmethod
+    def _extract_assistant_content_from_message(message: dict[str, Any]) -> str:
+        """Extract non-reasoning assistant content as plain text."""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type.startswith("reasoning"):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _extract_reasoning_content_from_message(message: dict[str, Any]) -> str:
+        """Extract reasoning text from DeepSeek/OpenAI-compatible message payloads."""
+        parts: list[str] = []
+
+        direct = message.get("reasoning_content")
+        if isinstance(direct, str) and direct.strip():
+            parts.append(direct.strip())
+
+        reasoning_payload = message.get("reasoning")
+        if isinstance(reasoning_payload, dict):
+            summary = reasoning_payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                parts.append(summary.strip())
+            elif isinstance(summary, list):
+                for item in summary:
+                    if not isinstance(item, dict):
+                        continue
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "").strip().lower()
+                if not item_type.startswith("reasoning"):
+                    continue
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+
+        return "\n".join(parts).strip()
+
+    def _apply_reasoning_request_tuning(
+        self,
+        *,
+        payload: dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Apply provider/model-specific reasoning settings to request payloads."""
+        updated = dict(payload)
+        applied = False
+
+        if provider == "deepseek":
+            thinking_mode = self._deepseek_thinking_mode()
+            if thinking_mode:
+                updated["thinking"] = {"type": thinking_mode}
+                updated.pop("temperature", None)
+                applied = True
+
+        if not self._is_reasoning_model(model):
+            return updated, applied
+
+        effort = self._reasoning_effort(provider=provider)
+        if provider == "deepseek":
+            updated["reasoning_effort"] = effort
+        else:
+            updated["reasoning"] = {"effort": effort}
+
+        # Reasoning models often ignore or reject temperature controls.
+        updated.pop("temperature", None)
+        return updated, True
+
+    @staticmethod
+    def _strip_reasoning_request_tuning(payload: dict[str, Any]) -> dict[str, Any]:
+        """Remove reasoning-specific request fields for compatibility fallback."""
+        updated = dict(payload)
+        updated.pop("reasoning", None)
+        updated.pop("reasoning_effort", None)
+        updated.pop("thinking", None)
+        return updated
+
+    @staticmethod
+    def _is_reasoning_model(model: str) -> bool:
+        """Return whether model name suggests reasoning-focused behavior."""
+        name = str(model or "").strip().lower()
+        if not name:
+            return False
+        markers = (
+            "reasoner",
+            "reasoning",
+            "o1",
+            "o3",
+            "o4",
+            "gpt-5",
+        )
+        return any(marker in name for marker in markers)
+
+    @staticmethod
+    def _reasoning_effort(*, provider: str) -> str:
+        """Resolve reasoning effort level with provider-specific env override."""
+        default = "medium"
+        if provider == "deepseek":
+            value = os.getenv("OVERMIND_DEEPSEEK_REASONING_EFFORT", default)
+        else:
+            value = os.getenv("OVERMIND_OPENAI_REASONING_EFFORT", default)
+        normalized = str(value or "").strip().lower()
+        if normalized in {"low", "medium", "high"}:
+            return normalized
+        return default
+
+    @staticmethod
+    def _deepseek_thinking_mode() -> str | None:
+        """Resolve optional DeepSeek thinking mode request setting."""
+        raw = str(os.getenv("OVERMIND_DEEPSEEK_THINKING_MODE", "") or "").strip().lower()
+        if raw in {"enabled", "disabled"}:
+            return raw
+        return None
 
     def _get_openai_tools(
         self, allowed_tools: list[str]

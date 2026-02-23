@@ -179,6 +179,9 @@ Environment variables:
 - `OVERMIND_OPENAI_MODELS_URL`: Optional override for OpenAI `/models` discovery.
 - `OVERMIND_DEEPSEEK_MODELS_URL`: Optional override for DeepSeek `/models` discovery.
 - `OVERMIND_OPENAI_TIMEOUT_S`: Timeout in seconds for model HTTP calls (default: `10`).
+- `OVERMIND_OPENAI_REASONING_EFFORT`: Reasoning effort for OpenAI reasoning-capable models (`low`, `medium`, `high`; default `medium`).
+- `OVERMIND_DEEPSEEK_REASONING_EFFORT`: Reasoning effort for DeepSeek reasoning-capable models (`low`, `medium`, `high`; default `medium`).
+- `OVERMIND_DEEPSEEK_THINKING_MODE`: Optional DeepSeek thinking mode override (`enabled` or `disabled`).
 
 ## API Coverage
 

@@ -586,3 +586,414 @@ def test_infer_with_openai_rejects_malformed_or_disallowed_calls(tmp_path, monke
         gateway._infer_with_openai(
             task="read", model="gpt-4o-mini", allowed_tools=["read_file"]
         )
+
+
+def test_infer_with_openai_applies_reasoning_tuning_for_reasoning_models(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "model-openai-reasoning.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(
+        repo,
+        openai_tools_provider=lambda _: [
+            {"type": "function", "function": {"name": "read_file"}}
+        ],
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("OVERMIND_OPENAI_REASONING_EFFORT", "high")
+
+    calls: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json.dumps(
+                                                {"path": "README.md"}
+                                            ),
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        payload = json.loads(req.data.decode("utf-8"))
+        calls.append(payload)
+        return _Resp()
+
+    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+
+    result = gateway._infer_with_openai(
+        task="read", model="gpt-5.2", allowed_tools=["read_file"]
+    )
+    assert result == {"tool_name": "read_file", "args": {"path": "README.md"}}
+    assert len(calls) == 1
+    assert calls[0].get("reasoning") == {"effort": "high"}
+    assert "temperature" not in calls[0]
+
+
+def test_infer_with_openai_retries_without_reasoning_fields_when_needed(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "model-openai-reasoning-retry.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(
+        repo,
+        openai_tools_provider=lambda _: [
+            {"type": "function", "function": {"name": "read_file"}}
+        ],
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+
+    calls: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json.dumps(
+                                                {"path": "README.md"}
+                                            ),
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        payload = json.loads(req.data.decode("utf-8"))
+        calls.append(payload)
+        if "reasoning" in payload:
+            raise urlerror.URLError("unsupported reasoning field")
+        return _Resp()
+
+    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+
+    result = gateway._infer_with_openai(
+        task="read", model="gpt-5.2", allowed_tools=["read_file"]
+    )
+    assert result == {"tool_name": "read_file", "args": {"path": "README.md"}}
+    assert len(calls) == 2
+    assert "reasoning" in calls[0]
+    assert "reasoning" not in calls[1]
+
+
+def test_model_gateway_persists_reasoning_and_tool_call_metadata(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "model-openai-reasoning-metadata.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(
+        repo,
+        openai_tools_provider=lambda _: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Reading file now.",
+                                "reasoning_content": "Need file contents before deciding.",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_reasoning_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json.dumps(
+                                                {"path": "README.md"}
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        model_gateway_module.urlrequest,
+        "urlopen",
+        lambda req, timeout=10: _Resp(),
+    )
+
+    agent = repo.create_agent(
+        name="planner-openai-reasoning-metadata",
+        role="ops",
+        model="gpt-5.2",
+        tools_allowed=["read_file"],
+    )
+    run = repo.create_run(agent["id"], "read README", step_limit=3)
+
+    result = gateway.infer(
+        task="read README",
+        agent=agent,
+        context={"run_id": run["id"]},
+    )
+    assert result["ok"] is True
+    assert result["tool_name"] == "read_file"
+    assert result["args"] == {"path": "README.md"}
+    assert result["response"]["reasoning_content"] == "Need file contents before deciding."
+    assert result["response"]["assistant_content"] == "Reading file now."
+    assert result["response"]["raw_tool_call"]["id"] == "call_reasoning_1"
+
+    rows = repo.list_model_calls(run["id"])
+    assert len(rows) == 1
+    assert rows[0]["response_json"]["reasoning_content"] == (
+        "Need file contents before deciding."
+    )
+    assert rows[0]["response_json"]["raw_tool_call"]["id"] == "call_reasoning_1"
+
+
+def test_deepseek_followup_replays_reasoning_content_for_tool_calls(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "model-deepseek-reasoning-followup.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(
+        repo,
+        openai_tools_provider=lambda _: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+
+    agent = repo.create_agent(
+        name="planner-deepseek-followup",
+        role="ops",
+        model="deepseek-chat",
+        tools_allowed=["read_file"],
+    )
+    run = repo.create_run(agent["id"], "read README", step_limit=5)
+
+    repo.create_model_call(
+        run_id=run["id"],
+        agent_id=agent["id"],
+        model="deepseek-chat",
+        request_json={"task": "read README"},
+        response_json={
+            "tool_name": "read_file",
+            "args": {"path": "README.md"},
+            "assistant_content": "Calling read_file.",
+            "reasoning_content": "Need to inspect README before planning next step.",
+            "raw_tool_call": {
+                "id": "call_deepseek_1",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "README.md"}),
+                },
+            },
+        },
+        usage_json={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        error=None,
+        latency_ms=10,
+    )
+
+    calls: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json.dumps(
+                                                {"path": "README.md"}
+                                            ),
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        calls.append(json.loads(req.data.decode("utf-8")))
+        return _Resp()
+
+    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+
+    result = gateway.infer(
+        task="decide the next action",
+        agent=agent,
+        context={
+            "run_id": run["id"],
+            "history": [
+                {
+                    "step_type": "tool",
+                    "input": {"tool_name": "read_file", "args": {"path": "README.md"}},
+                    "output": {"ok": True, "stdout": "hello"},
+                    "error": None,
+                }
+            ],
+        },
+    )
+    assert result["ok"] is True
+    assert result["tool_name"] == "read_file"
+    assert len(calls) == 1
+
+    messages = calls[0]["messages"]
+    assert messages[0]["role"] == "assistant"
+    assert "Need to inspect README before planning next step." in messages[0]["content"]
+    assert messages[0]["tool_calls"][0]["id"] == "call_deepseek_1"
+    assert messages[1]["role"] == "tool"
+    assert messages[1]["tool_call_id"] == "call_deepseek_1"
+    assert messages[2] == {"role": "user", "content": "decide the next action"}
+
+
+def test_infer_with_deepseek_applies_thinking_mode_when_enabled(
+    tmp_path, monkeypatch
+):
+    db_path = str(tmp_path / "model-deepseek-thinking.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(
+        repo,
+        openai_tools_provider=lambda _: [
+            {"type": "function", "function": {"name": "read_file"}}
+        ],
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "key")
+    monkeypatch.setenv("OVERMIND_DEEPSEEK_THINKING_MODE", "enabled")
+
+    calls: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json.dumps(
+                                                {"path": "README.md"}
+                                            ),
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        calls.append(json.loads(req.data.decode("utf-8")))
+        return _Resp()
+
+    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+
+    result = gateway._infer_with_deepseek(
+        task="read",
+        model="deepseek-chat",
+        allowed_tools=["read_file"],
+    )
+    assert result == {"tool_name": "read_file", "args": {"path": "README.md"}}
+    assert len(calls) == 1
+    assert calls[0]["thinking"] == {"type": "enabled"}
+    assert "temperature" not in calls[0]
