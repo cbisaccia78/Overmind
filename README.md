@@ -93,6 +93,7 @@ Electron desktop shell + single-process Python FastAPI backend:
 - Host Shell Runner (direct host OS execution)
 - Memory (FTS-backed retrieval + optional embeddings)
 - Structured Logs/Telemetry (events + replay timeline + tool/model call audit)
+- Live Run Stream (SSE follow mode + model output deltas on run detail page)
 - Desktop Dashboard via Electron (agents, runs, run detail)
 
 Key files:
@@ -174,7 +175,7 @@ Environment variables:
 - `DEEPSEEK_API_KEY`: Optional; enables DeepSeek model calls and model discovery.
 - `OVERMIND_EMBEDDING_MODEL`: OpenAI embedding model name (default: `text-embedding-3-small`).
 - `OVERMIND_OPENAI_EMBEDDINGS_URL`: Optional override for the embeddings endpoint.
-- `OVERMIND_OPENAI_CHAT_COMPLETIONS_URL`: Optional override for OpenAI-compatible chat completions.
+- `OVERMIND_OPENAI_RESPONSES_URL`: Optional override for OpenAI Responses API endpoint.
 - `OVERMIND_DEEPSEEK_CHAT_COMPLETIONS_URL`: Optional override for DeepSeek chat completions.
 - `OVERMIND_OPENAI_MODELS_URL`: Optional override for OpenAI `/models` discovery.
 - `OVERMIND_DEEPSEEK_MODELS_URL`: Optional override for DeepSeek `/models` discovery.
@@ -202,7 +203,7 @@ Runs:
 - `GET /api/runs/{id}/tool-calls`
 - `GET /api/runs/{id}/model-calls`
 - `GET /api/runs/{id}/events`
-- `GET /api/runs/{id}/replay`
+- `GET /api/runs/{id}/replay` (supports `follow=1` and `poll_ms=<int>` for live streaming)
 
 Memory:
 - `POST /api/memory/store`

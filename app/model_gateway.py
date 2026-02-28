@@ -12,7 +12,13 @@ import re
 import time
 from urllib import error as urlerror
 from urllib import request as urlrequest
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any, Callable
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - dependency optional at import time
+    OpenAI = None  # type: ignore[assignment]
 
 from .repository import Repository
 
@@ -76,6 +82,16 @@ class ModelGateway:
             "model": model,
             "context": context,
         }
+        run_id = str(context.get("run_id") or "").strip()
+        self._emit_run_event(
+            run_id=run_id,
+            event_type="model.infer.started",
+            payload={
+                "run_id": run_id,
+                "kind": "action",
+                "model": model,
+            },
+        )
 
         start = time.monotonic()
         try:
@@ -109,6 +125,12 @@ class ModelGateway:
                 "response": response_json,
                 "usage": usage_json,
             }
+            self._emit_model_output_events(
+                run_id=run_id,
+                model=model,
+                stream_kind="action",
+                response=response_json,
+            )
             error = None
         except Exception as exc:  # noqa: BLE001
             response_json = {}
@@ -124,18 +146,29 @@ class ModelGateway:
                 "usage": usage_json,
             }
             error = str(exc)
+            self._emit_run_event(
+                run_id=run_id,
+                event_type="model.infer.failed",
+                payload={
+                    "run_id": run_id,
+                    "kind": "action",
+                    "model": model,
+                    "error": error,
+                },
+            )
 
         latency_ms = int((time.monotonic() - start) * 1000)
-        self.repo.create_model_call(
-            run_id=context.get("run_id"),
-            agent_id=agent.get("id"),
-            model=model,
-            request_json=request_json,
-            response_json=result.get("response", {}),
-            usage_json=result.get("usage", {}),
-            error=error,
-            latency_ms=latency_ms,
-        )
+        if self.repo is not None:
+            self.repo.create_model_call(
+                run_id=context.get("run_id"),
+                agent_id=agent.get("id"),
+                model=model,
+                request_json=request_json,
+                response_json=result.get("response", {}),
+                usage_json=result.get("usage", {}),
+                error=error,
+                latency_ms=latency_ms,
+            )
         result["latency_ms"] = latency_ms
         return result
 
@@ -161,6 +194,16 @@ class ModelGateway:
             "context": context,
             "state": state,
         }
+        run_id = str(context.get("run_id") or "").strip()
+        self._emit_run_event(
+            run_id=run_id,
+            event_type="model.infer.started",
+            payload={
+                "run_id": run_id,
+                "kind": "supervisor",
+                "model": model,
+            },
+        )
 
         start = time.monotonic()
         try:
@@ -178,13 +221,12 @@ class ModelGateway:
                     state=state,
                 )
             elif os.getenv("OPENAI_API_KEY"):
-                raw = self._advise_with_openai_compatible(
+                raw = self._advise_with_openai_responses(
                     model=model,
-                    provider="openai",
                     api_key=os.getenv("OPENAI_API_KEY") or "",
                     endpoint=os.getenv(
-                        "OVERMIND_OPENAI_CHAT_COMPLETIONS_URL",
-                        "https://api.openai.com/v1/chat/completions",
+                        "OVERMIND_OPENAI_RESPONSES_URL",
+                        "https://api.openai.com/v1/responses",
                     ),
                     task=task,
                     state=state,
@@ -202,6 +244,13 @@ class ModelGateway:
                 "response": response_json,
                 "usage": usage_json,
             }
+            self._emit_model_output_events(
+                run_id=run_id,
+                model=model,
+                stream_kind="supervisor",
+                advice=advice,
+                response=response_json,
+            )
             error = None
         except Exception as exc:  # noqa: BLE001
             fallback = self._sanitize_supervisor_advice(
@@ -218,6 +267,16 @@ class ModelGateway:
                 "usage": usage_json,
             }
             error = str(exc)
+            self._emit_run_event(
+                run_id=run_id,
+                event_type="model.infer.failed",
+                payload={
+                    "run_id": run_id,
+                    "kind": "supervisor",
+                    "model": model,
+                    "error": error,
+                },
+            )
 
         latency_ms = int((time.monotonic() - start) * 1000)
         if self.repo is not None:
@@ -234,6 +293,144 @@ class ModelGateway:
         result["latency_ms"] = latency_ms
         return result
 
+    def _emit_run_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Persist a run event when run context and repository are available."""
+        if self.repo is None or not run_id:
+            return
+        self.repo.create_event(run_id, event_type, payload)
+
+    def _emit_model_output_events(
+        self,
+        *,
+        run_id: str,
+        model: str,
+        stream_kind: str,
+        response: dict[str, Any] | None = None,
+        advice: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit model output chunks as run events for live UI streaming."""
+        if self.repo is None or not run_id:
+            return
+
+        segments = self._collect_model_output_segments(
+            response=response,
+            advice=advice,
+        )
+        if not segments:
+            return
+
+        stream_base = f"{stream_kind}:{time.time_ns()}"
+        for seg_idx, segment in enumerate(segments):
+            channel = str(segment.get("channel") or "output")
+            text = str(segment.get("text") or "")
+            if not text:
+                continue
+            stream_id = f"{stream_base}:{seg_idx}"
+            self._emit_run_event(
+                run_id=run_id,
+                event_type="model.output.started",
+                payload={
+                    "run_id": run_id,
+                    "stream_id": stream_id,
+                    "kind": stream_kind,
+                    "model": model,
+                    "channel": channel,
+                },
+            )
+            for chunk_idx, chunk in enumerate(self._chunk_text(text, chunk_size=56)):
+                self._emit_run_event(
+                    run_id=run_id,
+                    event_type="model.output.delta",
+                    payload={
+                        "run_id": run_id,
+                        "stream_id": stream_id,
+                        "kind": stream_kind,
+                        "model": model,
+                        "channel": channel,
+                        "delta": chunk,
+                        "idx": chunk_idx,
+                    },
+                )
+            self._emit_run_event(
+                run_id=run_id,
+                event_type="model.output.completed",
+                payload={
+                    "run_id": run_id,
+                    "stream_id": stream_id,
+                    "kind": stream_kind,
+                    "model": model,
+                    "channel": channel,
+                    "total_chars": len(text),
+                },
+            )
+
+    @staticmethod
+    def _chunk_text(text: str, chunk_size: int) -> list[str]:
+        """Split text into fixed-size chunks for streaming events."""
+        if chunk_size <= 0:
+            return [text]
+        if not text:
+            return []
+        return [text[idx : idx + chunk_size] for idx in range(0, len(text), chunk_size)]
+
+    def _collect_model_output_segments(
+        self,
+        *,
+        response: dict[str, Any] | None,
+        advice: dict[str, Any] | None,
+    ) -> list[dict[str, str]]:
+        """Build streamable text segments from model response payloads."""
+        segments: list[dict[str, str]] = []
+        payload = response if isinstance(response, dict) else {}
+        reasoning_content = self._streamable_text(payload.get("reasoning_content"))
+        assistant_content = self._streamable_text(payload.get("assistant_content"))
+        if reasoning_content:
+            segments.append({"channel": "reasoning", "text": reasoning_content})
+        if assistant_content:
+            segments.append({"channel": "assistant", "text": assistant_content})
+
+        if isinstance(advice, dict) and advice:
+            advice_text = self._streamable_text(
+                json.dumps(advice, indent=2, ensure_ascii=True)
+            )
+            if advice_text:
+                segments.append({"channel": "advice", "text": advice_text})
+
+        if segments:
+            return segments
+
+        tool_name = str(payload.get("tool_name") or "").strip()
+        args_payload = payload.get("args")
+        if not tool_name:
+            return segments
+
+        args_text = ""
+        if isinstance(args_payload, dict) and args_payload:
+            args_text = json.dumps(args_payload, ensure_ascii=True, sort_keys=True)
+            if len(args_text) > 400:
+                args_text = args_text[:400].rstrip() + "..."
+        summary = f"Selected tool: {tool_name}"
+        if args_text:
+            summary = f"{summary} {args_text}"
+        segments.append({"channel": "decision", "text": summary})
+        return segments
+
+    @staticmethod
+    def _streamable_text(value: Any) -> str:
+        """Normalize arbitrary payload values into compact stream text."""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= 2000:
+            return text
+        return text[:2000].rstrip() + "..."
+
     def _should_use_openai(self, allowed_tools: list[str]) -> bool:
         """Return whether OpenAI tool-calling should be used.
 
@@ -249,6 +446,64 @@ class ModelGateway:
             and allowed_tools
             and self.openai_tools_provider is not None
         )
+
+    def _advise_with_openai_responses(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        endpoint: str,
+        task: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Request structured supervisor advice via OpenAI Responses API."""
+        payload = {
+            "model": model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": self._supervisor_system_prompt(),
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": self._supervisor_user_prompt(task=task, state=state),
+                        }
+                    ],
+                },
+            ],
+            "temperature": 0,
+        }
+        payload, used_reasoning = self._apply_reasoning_request_tuning(
+            payload=payload,
+            model=model,
+            provider="openai",
+        )
+        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        try:
+            data = self._request_openai_responses(
+                payload=payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        except RuntimeError:
+            if not used_reasoning:
+                raise
+            data = self._request_openai_responses(
+                payload=self._strip_reasoning_request_tuning(payload),
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        return self._parse_supervisor_json_response(data)
 
     def _advise_with_openai_compatible(
         self,
@@ -280,7 +535,7 @@ class ModelGateway:
         )
         timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
         try:
-            data = self._request_openai_chat_completion(
+            data = self._request_openai_api(
                 payload=payload,
                 api_key=api_key,
                 endpoint=endpoint,
@@ -289,7 +544,7 @@ class ModelGateway:
         except RuntimeError:
             if not used_reasoning:
                 raise
-            data = self._request_openai_chat_completion(
+            data = self._request_openai_api(
                 payload=self._strip_reasoning_request_tuning(payload),
                 api_key=api_key,
                 endpoint=endpoint,
@@ -324,8 +579,8 @@ class ModelGateway:
         )
 
     def _parse_supervisor_json_response(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Parse JSON content from chat completion response."""
-        content = self._extract_message_content(data)
+        """Parse JSON content from chat-completions or responses payloads."""
+        content = self._extract_response_text(data)
         if not content:
             raise RuntimeError("openai response missing content")
         try:
@@ -343,27 +598,69 @@ class ModelGateway:
         return parsed
 
     @staticmethod
-    def _extract_message_content(data: dict[str, Any]) -> str:
-        """Extract chat message content as plain text."""
+    def _extract_response_text(data: dict[str, Any]) -> str:
+        """Extract plain text from chat-completions or responses payloads."""
         try:
             message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
+            message = None
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                        continue
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+                text = "\n".join(parts).strip()
+                if text:
+                    return text
+
+        top_level_text = data.get("output_text")
+        if isinstance(top_level_text, str) and top_level_text.strip():
+            return top_level_text.strip()
+
+        output = data.get("output")
+        if not isinstance(output, list):
             return ""
-        content = message.get("content")
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
+
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type == "message":
+                content = item.get("content")
+                if isinstance(content, str):
+                    if content.strip():
+                        parts.append(content.strip())
                     continue
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            return "\n".join(parts).strip()
-        return ""
+                if isinstance(content, list):
+                    for chunk in content:
+                        if isinstance(chunk, str):
+                            if chunk.strip():
+                                parts.append(chunk.strip())
+                            continue
+                        if not isinstance(chunk, dict):
+                            continue
+                        chunk_type = str(chunk.get("type") or "").strip().lower()
+                        if chunk_type.startswith("reasoning"):
+                            continue
+                        text = chunk.get("text")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                continue
+            if item_type == "output_text":
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n".join(parts).strip()
 
     @staticmethod
     def _extract_first_json_object(text: str) -> str:
@@ -504,13 +801,13 @@ class ModelGateway:
         context: dict[str, Any] | None = None,
         include_meta: bool = False,
     ) -> dict[str, Any]:
-        """Infer a tool call via OpenAI-compatible chat-completions."""
+        """Infer a tool call via OpenAI Responses API."""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI tool calling")
         endpoint = os.getenv(
-            "OVERMIND_OPENAI_CHAT_COMPLETIONS_URL",
-            "https://api.openai.com/v1/chat/completions",
+            "OVERMIND_OPENAI_RESPONSES_URL",
+            "https://api.openai.com/v1/responses",
         )
         return self._infer_with_openai_compatible(
             task=task,
@@ -563,7 +860,152 @@ class ModelGateway:
         context: dict[str, Any] | None = None,
         include_meta: bool = False,
     ) -> dict[str, Any]:
-        """Infer one tool call using an OpenAI-compatible chat completions API."""
+        """Infer one tool call using provider-specific OpenAI-compatible APIs."""
+        if provider == "openai":
+            return self._infer_with_openai_responses_api(
+                task=task,
+                model=model,
+                allowed_tools=allowed_tools,
+                api_key=api_key,
+                endpoint=endpoint,
+                include_meta=include_meta,
+            )
+        return self._infer_with_chat_completions_compatible(
+            task=task,
+            model=model,
+            provider=provider,
+            allowed_tools=allowed_tools,
+            api_key=api_key,
+            endpoint=endpoint,
+            context=context,
+            include_meta=include_meta,
+        )
+
+    def _infer_with_openai_responses_api(
+        self,
+        *,
+        task: str,
+        model: str,
+        allowed_tools: list[str],
+        api_key: str,
+        endpoint: str,
+        include_meta: bool,
+    ) -> dict[str, Any]:
+        """Infer one tool call using OpenAI Responses API."""
+        tools, alias_map = self._get_openai_tools(allowed_tools)
+        if not tools:
+            raise RuntimeError("No allowed tools available for OpenAI tool calling")
+        response_tools = self._to_responses_tools(tools)
+        base_input = self._build_openai_responses_input(task)
+        payload = {
+            "model": model,
+            "input": base_input,
+            "tools": response_tools,
+            "tool_choice": "auto",
+            "temperature": 0,
+        }
+        payload, used_reasoning = self._apply_reasoning_request_tuning(
+            payload=payload,
+            model=model,
+            provider="openai",
+        )
+
+        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        try:
+            data = self._request_openai_responses(
+                payload=payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        except RuntimeError:
+            if not used_reasoning:
+                raise
+            data = self._request_openai_responses(
+                payload=self._strip_reasoning_request_tuning(payload),
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        try:
+            tool_name, args, raw_tool_call = self._parse_openai_responses_tool_call(
+                data=data,
+                allowed_tools=allowed_tools,
+                alias_map=alias_map,
+            )
+        except RuntimeError as exc:
+            if "openai response missing valid tool call" not in str(exc).lower():
+                raise
+            retry_payload = {
+                "model": model,
+                "input": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Select exactly one function call and return no plain text."
+                                ),
+                            }
+                        ],
+                    },
+                    *base_input,
+                ],
+                "tools": response_tools,
+                "tool_choice": "required",
+                "temperature": 0,
+            }
+            retry_payload, retry_used_reasoning = self._apply_reasoning_request_tuning(
+                payload=retry_payload,
+                model=model,
+                provider="openai",
+            )
+            try:
+                retry_data = self._request_openai_responses(
+                    payload=retry_payload,
+                    api_key=api_key,
+                    endpoint=endpoint,
+                    timeout_s=timeout_s,
+                )
+            except RuntimeError:
+                if not retry_used_reasoning:
+                    raise
+                retry_data = self._request_openai_responses(
+                    payload=self._strip_reasoning_request_tuning(retry_payload),
+                    api_key=api_key,
+                    endpoint=endpoint,
+                    timeout_s=timeout_s,
+                )
+            tool_name, args, raw_tool_call = self._parse_openai_responses_tool_call(
+                data=retry_data,
+                allowed_tools=allowed_tools,
+                alias_map=alias_map,
+            )
+            data = retry_data
+        result = {"tool_name": tool_name, "args": args}
+        if include_meta:
+            result.update(
+                self._build_openai_responses_tool_response_metadata(
+                    data=data,
+                    raw_tool_call=raw_tool_call,
+                )
+            )
+        return result
+
+    def _infer_with_chat_completions_compatible(
+        self,
+        *,
+        task: str,
+        model: str,
+        provider: str,
+        allowed_tools: list[str],
+        api_key: str,
+        endpoint: str,
+        context: dict[str, Any] | None = None,
+        include_meta: bool = False,
+    ) -> dict[str, Any]:
+        """Infer one tool call using a chat completions API."""
         tools, alias_map = self._get_openai_tools(allowed_tools)
         if not tools:
             raise RuntimeError("No allowed tools available for OpenAI tool calling")
@@ -587,7 +1029,7 @@ class ModelGateway:
 
         timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
         try:
-            data = self._request_openai_chat_completion(
+            data = self._request_openai_api(
                 payload=payload,
                 api_key=api_key,
                 endpoint=endpoint,
@@ -596,7 +1038,7 @@ class ModelGateway:
         except RuntimeError:
             if not used_reasoning:
                 raise
-            data = self._request_openai_chat_completion(
+            data = self._request_openai_api(
                 payload=self._strip_reasoning_request_tuning(payload),
                 api_key=api_key,
                 endpoint=endpoint,
@@ -632,7 +1074,7 @@ class ModelGateway:
                 provider=provider,
             )
             try:
-                retry_data = self._request_openai_chat_completion(
+                retry_data = self._request_openai_api(
                     payload=retry_payload,
                     api_key=api_key,
                     endpoint=endpoint,
@@ -641,7 +1083,7 @@ class ModelGateway:
             except RuntimeError:
                 if not retry_used_reasoning:
                     raise
-                retry_data = self._request_openai_chat_completion(
+                retry_data = self._request_openai_api(
                     payload=self._strip_reasoning_request_tuning(retry_payload),
                     api_key=api_key,
                     endpoint=endpoint,
@@ -663,7 +1105,104 @@ class ModelGateway:
         return result
 
     @staticmethod
-    def _request_openai_chat_completion(
+    def _build_openai_responses_input(task: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": task}],
+            }
+        ]
+
+    @staticmethod
+    def _to_responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert chat-completions function tool schema into responses schema."""
+        converted: list[dict[str, Any]] = []
+        for item in tools:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() != "function":
+                converted.append(dict(item))
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict):
+                converted.append(dict(item))
+                continue
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            payload: dict[str, Any] = {"type": "function", "name": name}
+            description = function.get("description")
+            if isinstance(description, str) and description.strip():
+                payload["description"] = description
+            parameters = function.get("parameters")
+            if isinstance(parameters, dict):
+                payload["parameters"] = parameters
+            strict = function.get("strict")
+            if isinstance(strict, bool):
+                payload["strict"] = strict
+            converted.append(payload)
+        return converted
+
+    def _request_openai_responses(
+        self,
+        *,
+        payload: dict[str, Any],
+        api_key: str,
+        endpoint: str,
+        timeout_s: int,
+    ) -> dict[str, Any]:
+        """Request OpenAI Responses API via the official OpenAI client."""
+        if OpenAI is None:
+            raise RuntimeError("openai package is required for OpenAI model calls")
+        base_url = self._responses_base_url(endpoint)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_s,
+        )
+        try:
+            response = client.responses.create(**payload)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"openai request failed: {exc}") from exc
+        return self._sdk_object_to_dict(response)
+
+    @staticmethod
+    def _responses_base_url(endpoint: str) -> str:
+        """Resolve OpenAI client base URL from a Responses endpoint URL."""
+        raw = str(endpoint or "").strip()
+        if not raw:
+            return "https://api.openai.com/v1"
+
+        parsed = urlsplit(raw)
+        if not parsed.scheme or not parsed.netloc:
+            return "https://api.openai.com/v1"
+
+        path = parsed.path.rstrip("/")
+        if path.endswith("/responses"):
+            path = path[: -len("/responses")]
+        if not path:
+            path = "/v1"
+        return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+    @staticmethod
+    def _sdk_object_to_dict(value: Any) -> dict[str, Any]:
+        """Convert SDK response objects to plain dictionaries."""
+        if isinstance(value, dict):
+            return dict(value)
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            output = to_dict()
+            if isinstance(output, dict):
+                return output
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            output = model_dump()
+            if isinstance(output, dict):
+                return output
+        raise RuntimeError("openai response missing structured payload")
+
+    @staticmethod
+    def _request_openai_api(
         *,
         payload: dict[str, Any],
         api_key: str,
@@ -684,6 +1223,60 @@ class ModelGateway:
                 return json.loads(resp.read().decode("utf-8"))
         except (urlerror.URLError, TimeoutError) as exc:
             raise RuntimeError(f"openai request failed: {exc}") from exc
+
+    @staticmethod
+    def _parse_openai_responses_tool_call(
+        *,
+        data: dict[str, Any],
+        allowed_tools: list[str],
+        alias_map: dict[str, str],
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        output = data.get("output")
+        if not isinstance(output, list):
+            raise RuntimeError("openai response missing valid tool call")
+
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() != "function_call":
+                continue
+            raw_tool_name = str(item.get("name") or "")
+            tool_name = alias_map.get(raw_tool_name, raw_tool_name)
+            args_raw = item.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "openai response missing valid tool call"
+                ) from exc
+            if tool_name not in allowed_tools:
+                raise RuntimeError(f"openai selected disallowed tool '{tool_name}'")
+            if not isinstance(args, dict):
+                raise RuntimeError("openai tool call arguments must be an object")
+            raw_tool_call = ModelGateway._normalize_responses_tool_call(item)
+            return tool_name, args, raw_tool_call
+
+        raise RuntimeError("openai response missing valid tool call")
+
+    @staticmethod
+    def _normalize_responses_tool_call(item: dict[str, Any]) -> dict[str, Any]:
+        name = str(item.get("name") or "").strip()
+        call_id = str(item.get("call_id") or item.get("id") or "").strip()
+        if not call_id:
+            call_id = f"call_{name.replace('.', '_')}" if name else "call_function"
+        args_payload = item.get("arguments")
+        if isinstance(args_payload, str):
+            args_json = args_payload
+        else:
+            args_json = json.dumps(args_payload or {}, separators=(",", ":"), ensure_ascii=True)
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": args_json,
+            },
+        }
 
     @staticmethod
     def _parse_openai_tool_call(
@@ -869,6 +1462,24 @@ class ModelGateway:
             metadata["raw_tool_call"] = dict(raw_tool_call)
         return metadata
 
+    def _build_openai_responses_tool_response_metadata(
+        self,
+        *,
+        data: dict[str, Any],
+        raw_tool_call: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Extract provider-agnostic metadata from a responses tool-call payload."""
+        metadata: dict[str, Any] = {}
+        assistant_content = self._extract_assistant_content_from_response(data)
+        reasoning_content = self._extract_reasoning_content_from_response(data)
+        if assistant_content:
+            metadata["assistant_content"] = assistant_content
+        if reasoning_content:
+            metadata["reasoning_content"] = reasoning_content
+        if raw_tool_call:
+            metadata["raw_tool_call"] = dict(raw_tool_call)
+        return metadata
+
     @staticmethod
     def _extract_assistant_content_from_message(message: dict[str, Any]) -> str:
         """Extract non-reasoning assistant content as plain text."""
@@ -925,6 +1536,104 @@ class ModelGateway:
                 if not item_type.startswith("reasoning"):
                     continue
                 text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _extract_assistant_content_from_response(data: dict[str, Any]) -> str:
+        """Extract assistant content from OpenAI Responses output payload."""
+        top_level = data.get("output_text")
+        if isinstance(top_level, str) and top_level.strip():
+            return top_level.strip()
+
+        output = data.get("output")
+        if not isinstance(output, list):
+            return ""
+
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type != "message":
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                if content.strip():
+                    parts.append(content.strip())
+                continue
+            if not isinstance(content, list):
+                continue
+            for chunk in content:
+                if isinstance(chunk, str):
+                    if chunk.strip():
+                        parts.append(chunk.strip())
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_type = str(chunk.get("type") or "").strip().lower()
+                if chunk_type.startswith("reasoning"):
+                    continue
+                text = chunk.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _extract_reasoning_content_from_response(data: dict[str, Any]) -> str:
+        """Extract reasoning content from OpenAI Responses output payload."""
+        parts: list[str] = []
+
+        reasoning = data.get("reasoning")
+        if isinstance(reasoning, dict):
+            summary = reasoning.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                parts.append(summary.strip())
+            elif isinstance(summary, list):
+                for item in summary:
+                    if not isinstance(item, dict):
+                        continue
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+
+        output = data.get("output")
+        if not isinstance(output, list):
+            return "\n".join(parts).strip()
+
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type.startswith("reasoning"):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+                summary = item.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    parts.append(summary.strip())
+                elif isinstance(summary, list):
+                    for summary_item in summary:
+                        if not isinstance(summary_item, dict):
+                            continue
+                        summary_text = summary_item.get("text")
+                        if isinstance(summary_text, str) and summary_text.strip():
+                            parts.append(summary_text.strip())
+                continue
+            if item_type != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for chunk in content:
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_type = str(chunk.get("type") or "").strip().lower()
+                if not chunk_type.startswith("reasoning"):
+                    continue
+                text = chunk.get("text")
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
 

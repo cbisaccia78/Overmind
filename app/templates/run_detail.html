@@ -13,6 +13,12 @@
   </div>
 </section>
 
+<section class="card">
+  <h3>Live Model Output</h3>
+  <p id="live-connection-status" class="muted">Connecting to live replay stream...</p>
+  <pre id="live-model-output" class="live-stream">Waiting for model output...</pre>
+</section>
+
 {% if run_input_error %}
 <section class="card">
   <p class="pill pill-bad">{{ run_input_error }}</p>
@@ -93,4 +99,136 @@
     {% endfor %}
   </ul>
 </section>
+
+<script>
+(() => {
+  const runId = {{ run.id | tojson }};
+  const outputEl = document.getElementById("live-model-output");
+  const statusEl = document.getElementById("live-connection-status");
+  if (!outputEl || !statusEl || typeof EventSource === "undefined") {
+    if (statusEl) {
+      statusEl.textContent = "Live stream unavailable in this browser.";
+    }
+    return;
+  }
+
+  const replayUrl = `/api/runs/${encodeURIComponent(runId)}/replay?follow=1&poll_ms=250`;
+  const source = new EventSource(replayUrl);
+  const seenModelCalls = new Set();
+  let hasRenderedOutput = false;
+
+  const appendText = (text) => {
+    if (!text) {
+      return;
+    }
+    if (!hasRenderedOutput) {
+      outputEl.textContent = "";
+      hasRenderedOutput = true;
+    }
+    outputEl.textContent += text;
+    outputEl.scrollTop = outputEl.scrollHeight;
+  };
+
+  const appendLine = (text = "") => appendText(`${text}\n`);
+
+  const renderModelCall = (modelCall) => {
+    if (!modelCall || typeof modelCall !== "object") {
+      return;
+    }
+    const modelCallId = String(modelCall.id || "");
+    if (modelCallId && seenModelCalls.has(modelCallId)) {
+      return;
+    }
+    if (modelCallId) {
+      seenModelCalls.add(modelCallId);
+    }
+
+    const response = modelCall.response_json || {};
+    const model = String(modelCall.model || "model");
+    const reasoning = String(response.reasoning_content || "").trim();
+    const assistant = String(response.assistant_content || "").trim();
+
+    if (reasoning) {
+      appendLine(`[${model} | reasoning]`);
+      appendLine(reasoning);
+      appendLine();
+    }
+    if (assistant) {
+      appendLine(`[${model} | assistant]`);
+      appendLine(assistant);
+      appendLine();
+    }
+    if (!reasoning && !assistant && response.tool_name) {
+      appendLine(`[${model} | decision]`);
+      appendLine(`Selected tool: ${response.tool_name}`);
+      appendLine();
+    }
+  };
+
+  source.onopen = () => {
+    statusEl.textContent = "Live replay connected.";
+  };
+
+  source.onmessage = (evt) => {
+    let item;
+    try {
+      item = JSON.parse(evt.data);
+    } catch (_err) {
+      return;
+    }
+    if (!item || typeof item !== "object") {
+      return;
+    }
+    if (item.kind === "model_call") {
+      renderModelCall(item.data);
+      return;
+    }
+    if (item.kind !== "event") {
+      return;
+    }
+
+    const eventData = item.data || {};
+    const eventType = String(eventData.type || "");
+    const payload = eventData.payload_json || {};
+    const model = String(payload.model || "model");
+    if (eventType === "model.infer.started") {
+      appendLine(`[${model}] thinking...`);
+      return;
+    }
+    if (eventType === "model.infer.failed") {
+      appendLine(`[${model}] error: ${String(payload.error || "unknown error")}`);
+      appendLine();
+      return;
+    }
+    if (eventType === "model.output.started") {
+      appendLine(`[${model} | ${String(payload.channel || "output")}]`);
+      return;
+    }
+    if (eventType === "model.output.delta") {
+      appendText(String(payload.delta || ""));
+      return;
+    }
+    if (eventType === "model.output.completed") {
+      appendLine();
+      appendLine();
+    }
+  };
+
+  source.addEventListener("done", (evt) => {
+    let status = "completed";
+    try {
+      const payload = JSON.parse(evt.data || "{}");
+      status = String(payload.status || status);
+    } catch (_err) {
+      status = "completed";
+    }
+    statusEl.textContent = `Live replay finished (${status}).`;
+    source.close();
+  });
+
+  source.onerror = () => {
+    statusEl.textContent = "Live replay interrupted. Reload to reconnect.";
+  };
+})();
+</script>
 {% endblock %}

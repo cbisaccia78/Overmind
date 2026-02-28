@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib import error as urlerror
@@ -413,6 +414,49 @@ def _run_detail_context(
     }
 
 
+def _build_run_timeline(repo: Repository, run_id: str) -> list[dict[str, Any]]:
+    """Build a merged run timeline across steps/tool calls/model calls/events."""
+    steps = repo.list_steps(run_id)
+    tool_calls = repo.list_tool_calls(run_id)
+    model_calls = repo.list_model_calls(run_id)
+    events = repo.list_events(run_id)
+
+    timeline: list[dict[str, Any]] = []
+    for item in steps:
+        timeline.append({"kind": "step", "ts": item.get("started_at"), "data": item})
+    for item in tool_calls:
+        timeline.append(
+            {"kind": "tool_call", "ts": item.get("created_at"), "data": item}
+        )
+    for item in model_calls:
+        timeline.append(
+            {"kind": "model_call", "ts": item.get("created_at"), "data": item}
+        )
+    for item in events:
+        timeline.append({"kind": "event", "ts": item.get("ts"), "data": item})
+
+    timeline.sort(
+        key=lambda x: (
+            x.get("ts") or "",
+            str(x.get("kind") or ""),
+            str((x.get("data") or {}).get("id") or ""),
+        )
+    )
+    return timeline
+
+
+def _timeline_item_key(item: dict[str, Any]) -> str:
+    """Return a stable dedupe key for a timeline item."""
+    kind = str(item.get("kind") or "")
+    data = item.get("data")
+    if isinstance(data, dict):
+        item_id = str(data.get("id") or "").strip()
+        if item_id:
+            return f"{kind}:{item_id}"
+    encoded = json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"{kind}:{encoded}"
+
+
 def _settings_context(
     *,
     settings_error: str | None = None,
@@ -696,11 +740,14 @@ def get_run_events(run_id: str) -> list[dict[str, Any]]:
 
 
 @app.get("/api/runs/{run_id}/replay")
-def replay_run(run_id: str) -> StreamingResponse:
+def replay_run(run_id: str, follow: bool = False, poll_ms: int = 300) -> StreamingResponse:
     """Stream a run timeline as Server-Sent Events (SSE).
 
     Args:
         run_id: Run ID.
+        follow: When true, keep streaming new timeline items until the run reaches
+            a terminal status.
+        poll_ms: Poll interval for follow mode.
 
     Returns:
         Streaming SSE response where each event contains a JSON timeline item.
@@ -712,27 +759,8 @@ def replay_run(run_id: str) -> StreamingResponse:
     run = repo.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-
-    steps = repo.list_steps(run_id)
-    tool_calls = repo.list_tool_calls(run_id)
-    model_calls = repo.list_model_calls(run_id)
-    events = repo.list_events(run_id)
-
-    timeline: list[dict[str, Any]] = []
-    for item in steps:
-        timeline.append({"kind": "step", "ts": item.get("started_at"), "data": item})
-    for item in tool_calls:
-        timeline.append(
-            {"kind": "tool_call", "ts": item.get("created_at"), "data": item}
-        )
-    for item in model_calls:
-        timeline.append(
-            {"kind": "model_call", "ts": item.get("created_at"), "data": item}
-        )
-    for item in events:
-        timeline.append({"kind": "event", "ts": item.get("ts"), "data": item})
-
-    timeline.sort(key=lambda x: x.get("ts") or "")
+    poll_seconds = max(0.05, min(5.0, float(poll_ms) / 1000.0))
+    terminal_statuses = {"succeeded", "failed", "canceled"}
 
     def _stream() -> Any:
         """Yield SSE lines for timeline items.
@@ -740,8 +768,34 @@ def replay_run(run_id: str) -> StreamingResponse:
         Yields:
             SSE-formatted `data:` lines.
         """
-        for item in timeline:
-            yield f"data: {json.dumps(item)}\n\n"
+        if not follow:
+            for item in _build_run_timeline(repo, run_id):
+                yield f"data: {json.dumps(item)}\n\n"
+            return
+
+        seen_keys: set[str] = set()
+        while True:
+            emitted = False
+            for item in _build_run_timeline(repo, run_id):
+                key = _timeline_item_key(item)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                emitted = True
+                yield f"data: {json.dumps(item)}\n\n"
+
+            latest = repo.get_run(run_id)
+            status = str((latest or {}).get("status") or "")
+            if status in terminal_statuses and not emitted:
+                yield (
+                    "event: done\n"
+                    f"data: {json.dumps({'run_id': run_id, 'status': status})}\n\n"
+                )
+                break
+
+            if not emitted:
+                yield ": keepalive\n\n"
+            time.sleep(poll_seconds)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 

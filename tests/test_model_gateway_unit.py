@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from urllib import error as urlerror
 
 import pytest
 
@@ -74,6 +73,35 @@ def test_model_gateway_persists_error_when_model_fails(tmp_path):
     assert "unavailable" in rows[0]["error"]
 
 
+def test_model_gateway_emits_model_output_events_for_live_stream(tmp_path):
+    db_path = str(tmp_path / "model-events.db")
+    init_db(db_path)
+    repo = Repository(db_path)
+    gateway = ModelGateway(repo)
+
+    agent = repo.create_agent(
+        name="planner-events",
+        role="ops",
+        model="stub-v1",
+        tools_allowed=["run_shell"],
+    )
+    run = repo.create_run(agent["id"], "shell:echo hi", step_limit=3)
+
+    result = gateway.infer(
+        task="shell:echo hi",
+        agent=agent,
+        context={"run_id": run["id"]},
+    )
+
+    assert result["ok"] is True
+    events = repo.list_events(run["id"])
+    event_types = [str(event.get("type") or "") for event in events]
+    assert "model.infer.started" in event_types
+    assert "model.output.started" in event_types
+    assert "model.output.delta" in event_types
+    assert "model.output.completed" in event_types
+
+
 def test_model_gateway_uses_openai_tool_call_when_configured(tmp_path, monkeypatch):
     db_path = str(tmp_path / "model-openai.db")
     init_db(db_path)
@@ -97,39 +125,22 @@ def test_model_gateway_uses_openai_tool_call_when_configured(tmp_path, monkeypat
             }
         ]
 
-    class _FakeResp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            body = {
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": json.dumps({"path": "README.md"}),
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-            return json.dumps(body).encode("utf-8")
-
     gateway = ModelGateway(repo, openai_tools_provider=fake_openai_tools_provider)
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(
-        model_gateway_module.urlrequest,
-        "urlopen",
-        lambda req, timeout=10: _FakeResp(),
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_read_file_1",
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "README.md"}),
+                }
+            ]
+        },
     )
 
     agent = repo.create_agent(
@@ -269,41 +280,21 @@ def test_model_gateway_resolves_openai_tool_aliases(tmp_path, monkeypatch):
             {"mcp_playwright_navigate": "mcp.playwright.navigate"},
         )
 
-    class _FakeResp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        def read(self):
-            body = {
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "mcp_playwright_navigate",
-                                        "arguments": json.dumps(
-                                            {"url": "https://wikipedia.org"}
-                                        ),
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-            return json.dumps(body).encode("utf-8")
-
     gateway = ModelGateway(repo, openai_tools_provider=fake_openai_tools_provider)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(
-        model_gateway_module.urlrequest,
-        "urlopen",
-        lambda req, timeout=10: _FakeResp(),
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_nav_1",
+                    "name": "mcp_playwright_navigate",
+                    "arguments": json.dumps({"url": "https://wikipedia.org"}),
+                }
+            ]
+        },
     )
 
     result = gateway._infer_with_openai(
@@ -343,49 +334,34 @@ def test_infer_with_openai_retries_required_tool_choice_on_missing_tool_call(
 
     calls: list[dict] = []
 
-    class _Resp:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        def read(self):
-            return json.dumps(self.payload).encode("utf-8")
-
-    def _urlopen(req, timeout=10):
-        del timeout
-        payload = json.loads(req.data.decode("utf-8"))
+    def _request_openai_responses(*, payload: dict, **kwargs):
+        del kwargs
         calls.append(payload)
         if payload.get("tool_choice") == "auto":
-            return _Resp({"choices": [{"message": {"content": "No tool yet"}}]})
-        assert payload.get("tool_choice") == "required"
-        return _Resp(
-            {
-                "choices": [
+            return {
+                "output": [
                     {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": json.dumps(
-                                            {"path": "README.md"}
-                                        ),
-                                    }
-                                }
-                            ]
-                        }
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "No tool yet"}
+                        ],
                     }
                 ]
             }
-        )
+        assert payload.get("tool_choice") == "required"
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_read_file_2",
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "README.md"}),
+                }
+            ]
+        }
 
-    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+    monkeypatch.setattr(gateway, "_request_openai_responses", _request_openai_responses)
 
     result = gateway._infer_with_openai(
         task="read me",
@@ -396,7 +372,7 @@ def test_infer_with_openai_retries_required_tool_choice_on_missing_tool_call(
     assert len(calls) == 2
     assert calls[0]["tool_choice"] == "auto"
     assert calls[1]["tool_choice"] == "required"
-    assert calls[1]["messages"][0]["role"] == "system"
+    assert calls[1]["input"][0]["role"] == "system"
 
 
 def test_infer_with_model_covers_write_recall_remember_paths():
@@ -488,11 +464,13 @@ def test_infer_with_openai_wraps_transport_errors(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("OPENAI_API_KEY", "key")
 
-    def _fail(req, timeout=10):
-        del req, timeout
-        raise urlerror.URLError("network")
-
-    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _fail)
+    monkeypatch.setattr(
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: (_ for _ in ()).throw(
+            RuntimeError("openai request failed: network")
+        ),
+    )
 
     with pytest.raises(RuntimeError, match="openai request failed"):
         gateway._infer_with_openai(
@@ -512,24 +490,18 @@ def test_infer_with_openai_rejects_malformed_or_disallowed_calls(tmp_path, monke
     )
     monkeypatch.setenv("OPENAI_API_KEY", "key")
 
-    class _Resp:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        def read(self):
-            return json.dumps(self.payload).encode("utf-8")
-
     monkeypatch.setattr(
-        model_gateway_module.urlrequest,
-        "urlopen",
-        lambda req, timeout=10: _Resp({"choices": [{"message": {}}]}),
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "No function call"}],
+                }
+            ]
+        },
     )
     with pytest.raises(RuntimeError, match="response missing valid tool call"):
         gateway._infer_with_openai(
@@ -537,21 +509,18 @@ def test_infer_with_openai_rejects_malformed_or_disallowed_calls(tmp_path, monke
         )
 
     monkeypatch.setattr(
-        model_gateway_module.urlrequest,
-        "urlopen",
-        lambda req, timeout=10: _Resp(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [
-                                {"function": {"name": "run_shell", "arguments": "{}"}}
-                            ]
-                        }
-                    }
-                ]
-            }
-        ),
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_disallowed",
+                    "name": "run_shell",
+                    "arguments": "{}",
+                }
+            ]
+        },
     )
     with pytest.raises(RuntimeError, match="selected disallowed tool"):
         gateway._infer_with_openai(
@@ -559,28 +528,18 @@ def test_infer_with_openai_rejects_malformed_or_disallowed_calls(tmp_path, monke
         )
 
     monkeypatch.setattr(
-        model_gateway_module.urlrequest,
-        "urlopen",
-        lambda req, timeout=10: _Resp(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": json.dumps(
-                                            ["not", "an", "object"]
-                                        ),
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-        ),
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_bad_args",
+                    "name": "read_file",
+                    "arguments": json.dumps(["not", "an", "object"]),
+                }
+            ]
+        },
     )
     with pytest.raises(RuntimeError, match="arguments must be an object"):
         gateway._infer_with_openai(
@@ -605,43 +564,21 @@ def test_infer_with_openai_applies_reasoning_tuning_for_reasoning_models(
 
     calls: list[dict] = []
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        def read(self):
-            return json.dumps(
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "tool_calls": [
-                                    {
-                                        "function": {
-                                            "name": "read_file",
-                                            "arguments": json.dumps(
-                                                {"path": "README.md"}
-                                            ),
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    def _urlopen(req, timeout=10):
-        del timeout
-        payload = json.loads(req.data.decode("utf-8"))
+    def _request_openai_responses(*, payload: dict, **kwargs):
+        del kwargs
         calls.append(payload)
-        return _Resp()
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_reasoning_tune",
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "README.md"}),
+                }
+            ]
+        }
 
-    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+    monkeypatch.setattr(gateway, "_request_openai_responses", _request_openai_responses)
 
     result = gateway._infer_with_openai(
         task="read", model="gpt-5.2", allowed_tools=["read_file"]
@@ -668,45 +605,23 @@ def test_infer_with_openai_retries_without_reasoning_fields_when_needed(
 
     calls: list[dict] = []
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        def read(self):
-            return json.dumps(
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "tool_calls": [
-                                    {
-                                        "function": {
-                                            "name": "read_file",
-                                            "arguments": json.dumps(
-                                                {"path": "README.md"}
-                                            ),
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    def _urlopen(req, timeout=10):
-        del timeout
-        payload = json.loads(req.data.decode("utf-8"))
+    def _request_openai_responses(*, payload: dict, **kwargs):
+        del kwargs
         calls.append(payload)
         if "reasoning" in payload:
-            raise urlerror.URLError("unsupported reasoning field")
-        return _Resp()
+            raise RuntimeError("openai request failed: unsupported reasoning field")
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_reasoning_retry",
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "README.md"}),
+                }
+            ]
+        }
 
-    monkeypatch.setattr(model_gateway_module.urlrequest, "urlopen", _urlopen)
+    monkeypatch.setattr(gateway, "_request_openai_responses", _request_openai_responses)
 
     result = gateway._infer_with_openai(
         task="read", model="gpt-5.2", allowed_tools=["read_file"]
@@ -741,44 +656,33 @@ def test_model_gateway_persists_reasoning_and_tool_call_metadata(tmp_path, monke
     )
     monkeypatch.setenv("OPENAI_API_KEY", "key")
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        def read(self):
-            return json.dumps(
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "Reading file now.",
-                                "reasoning_content": "Need file contents before deciding.",
-                                "tool_calls": [
-                                    {
-                                        "id": "call_reasoning_1",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "read_file",
-                                            "arguments": json.dumps(
-                                                {"path": "README.md"}
-                                            ),
-                                        },
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
     monkeypatch.setattr(
-        model_gateway_module.urlrequest,
-        "urlopen",
-        lambda req, timeout=10: _Resp(),
+        gateway,
+        "_request_openai_responses",
+        lambda **kwargs: {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Need file contents before deciding.",
+                        }
+                    ],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Reading file now."}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_reasoning_1",
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "README.md"}),
+                },
+            ]
+        },
     )
 
     agent = repo.create_agent(

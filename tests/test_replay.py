@@ -37,3 +37,30 @@ def test_replay_stream_returns_timeline(client):
     replay = client.get(f"/api/runs/{run['id']}/replay")
     assert replay.status_code == 200
     assert "data:" in replay.text
+
+
+def test_replay_follow_stream_emits_done_event(client):
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "mem-agent-follow",
+            "role": "memory",
+            "model": "stub-v1",
+            "tools_allowed": ["store_memory"],
+        },
+    ).json()
+
+    run = client.post(
+        "/api/runs",
+        json={
+            "agent_id": agent["id"],
+            "task": "remember:notes:follow stream",
+            "step_limit": 5,
+        },
+    ).json()
+    _wait_for_run(client, run["id"])
+
+    replay = client.get(f"/api/runs/{run['id']}/replay?follow=1&poll_ms=10")
+    assert replay.status_code == 200
+    assert "data:" in replay.text
+    assert "event: done" in replay.text

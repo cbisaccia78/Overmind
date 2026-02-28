@@ -106,6 +106,8 @@ def test_run_detail_shows_awaiting_prompt_and_accepts_followup_input(client):
     assert "Agent Needs Input" in detail.text
     assert "Continue Run" in detail.text
     assert "Please provide the full URL to fetch." in detail.text
+    assert "Live Model Output" in detail.text
+    assert "live-model-output" in detail.text
 
     empty = client.post(
         f"/runs/{run['id']}/input",
