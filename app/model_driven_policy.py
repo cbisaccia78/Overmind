@@ -17,6 +17,11 @@ from .policy import PlanContext, PlannedAction, Policy
 class ModelDrivenPolicy(Policy):
     """Policy that lets the model choose the next action each turn."""
 
+    _SUMMARY_MIN_HISTORY = 12
+    _SUMMARY_KEEP_RECENT = 6
+    _SUMMARY_REFRESH_STRIDE = 4
+    _SUMMARY_MAX_INPUT_STEPS = 40
+
     def __init__(self, model_gateway: ModelGateway):
         """Create a policy instance.
 
@@ -24,6 +29,7 @@ class ModelDrivenPolicy(Policy):
             model_gateway: Model inference gateway used for action selection.
         """
         self.model_gateway = model_gateway
+        self._history_summary_cache: dict[str, dict[str, Any]] = {}
 
     def plan(
         self,
@@ -96,9 +102,24 @@ class ModelDrivenPolicy(Policy):
         - On tool failure, ask the model to recover using failure context.
         - Do not use task keyword contracts or phase heuristics.
         """
+        history_summary = self._maybe_refresh_history_summary(
+            task=task,
+            agent=agent,
+            context=context,
+            history=history,
+        )
+        next_context = dict(context)
+        if history_summary:
+            next_context["history_summary"] = history_summary
+
         if not history:
-            prompt = self._build_initial_prompt(task=task)
-            return self._infer_next_action(prompt=prompt, agent=agent, context=context)
+            prompt = self._build_initial_prompt(
+                task=task,
+                history_summary=history_summary,
+            )
+            return self._infer_next_action(
+                prompt=prompt, agent=agent, context=next_context
+            )
 
         last_step = history[-1]
         last_step_type = str(last_step.get("step_type") or "")
@@ -120,11 +141,12 @@ class ModelDrivenPolicy(Policy):
                     error_message=error_message,
                     failure_memory=self._collect_failure_memory(history),
                     history=history,
+                    history_summary=history_summary,
                 )
                 return self._infer_next_action(
                     prompt=prompt,
                     agent=agent,
-                    context=context,
+                    context=next_context,
                 )
 
             stall = self._detect_stall_repetition(history)
@@ -137,11 +159,12 @@ class ModelDrivenPolicy(Policy):
                     last_tool_name=last_tool_name,
                     last_tool_summary=self._summarize_tool_output(output),
                     history=history,
+                    history_summary=history_summary,
                 )
                 action = self._infer_next_action(
                     prompt=prompt,
                     agent=agent,
-                    context=context,
+                    context=next_context,
                 )
                 blocked_tools = set(stall.get("blocked_tool_names") or [])
                 if self._violates_stall_constraint(action, blocked_tools):
@@ -150,11 +173,12 @@ class ModelDrivenPolicy(Policy):
                         blocked_tool_names=sorted(blocked_tools),
                         attempted_action=action,
                         history=history,
+                        history_summary=history_summary,
                     )
                     return self._infer_next_action(
                         prompt=violation_prompt,
                         agent=agent,
-                        context=context,
+                        context=next_context,
                     )
                 return action
 
@@ -163,11 +187,18 @@ class ModelDrivenPolicy(Policy):
                 last_tool_name=last_tool_name,
                 last_tool_summary=self._summarize_tool_output(output),
                 history=history,
+                history_summary=history_summary,
             )
-            return self._infer_next_action(prompt=prompt, agent=agent, context=context)
+            return self._infer_next_action(
+                prompt=prompt, agent=agent, context=next_context
+            )
 
-        prompt = self._build_initial_prompt(task=task, history=history)
-        return self._infer_next_action(prompt=prompt, agent=agent, context=context)
+        prompt = self._build_initial_prompt(
+            task=task,
+            history=history,
+            history_summary=history_summary,
+        )
+        return self._infer_next_action(prompt=prompt, agent=agent, context=next_context)
 
     def _infer_next_action(
         self,
@@ -251,19 +282,25 @@ class ModelDrivenPolicy(Policy):
 
     @staticmethod
     def _build_initial_prompt(
-        *, task: str, history: list[dict[str, Any]] | None = None
+        *,
+        task: str,
+        history: list[dict[str, Any]] | None = None,
+        history_summary: dict[str, Any] | None = None,
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
         history_items = history or []
         state_block = ModelDrivenPolicy._render_state_and_progress(
             task=task, history=history_items
         )
+        summary_block = ModelDrivenPolicy._render_history_summary_block(history_summary)
         recent = ModelDrivenPolicy._render_recent_history(history_items)
         contract = ModelDrivenPolicy._decision_contract()
+        summary_section = f"{summary_block}\n\n" if summary_block else ""
         if recent:
             return (
                 f"{task_block}\n\n"
                 f"{state_block}\n\n"
+                f"{summary_section}"
                 "Recent run history:\n"
                 f"{recent}\n\n"
                 f"{contract}"
@@ -271,6 +308,7 @@ class ModelDrivenPolicy(Policy):
         return (
             f"{task_block}\n\n"
             f"{state_block}\n\n"
+            f"{summary_section}"
             f"{contract}"
         )
 
@@ -281,16 +319,20 @@ class ModelDrivenPolicy(Policy):
         last_tool_name: str,
         last_tool_summary: str,
         history: list[dict[str, Any]],
+        history_summary: dict[str, Any] | None = None,
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
         state_block = ModelDrivenPolicy._render_state_and_progress(
             task=task, history=history
         )
+        summary_block = ModelDrivenPolicy._render_history_summary_block(history_summary)
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
+        summary_section = f"{summary_block}\n\n" if summary_block else ""
         return (
             f"{task_block}\n\n"
             f"{state_block}\n\n"
+            f"{summary_section}"
             f"Last tool: {last_tool_name or 'none'}\n"
             "Last tool result summary:\n"
             f"{last_tool_summary or 'none'}\n\n"
@@ -309,17 +351,21 @@ class ModelDrivenPolicy(Policy):
         last_tool_name: str,
         last_tool_summary: str,
         history: list[dict[str, Any]],
+        history_summary: dict[str, Any] | None = None,
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
         state_block = ModelDrivenPolicy._render_state_and_progress(
             task=task, history=history
         )
+        summary_block = ModelDrivenPolicy._render_history_summary_block(history_summary)
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
         blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        summary_section = f"{summary_block}\n\n" if summary_block else ""
         return (
             f"{task_block}\n\n"
             f"{state_block}\n\n"
+            f"{summary_section}"
             "Stall detected:\n"
             f"- Pattern observed across the last {repeats} successful tool actions.\n"
             f"- Pattern summary: {pattern_summary or 'repeated low-progress actions'}\n\n"
@@ -341,11 +387,13 @@ class ModelDrivenPolicy(Policy):
         blocked_tool_names: list[str],
         attempted_action: dict[str, Any],
         history: list[dict[str, Any]],
+        history_summary: dict[str, Any] | None = None,
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
         state_block = ModelDrivenPolicy._render_state_and_progress(
             task=task, history=history
         )
+        summary_block = ModelDrivenPolicy._render_history_summary_block(history_summary)
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
         attempted_kind = str(attempted_action.get("kind") or "")
@@ -354,9 +402,11 @@ class ModelDrivenPolicy(Policy):
             dict(attempted_action.get("args") or {})
         )
         blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        summary_section = f"{summary_block}\n\n" if summary_block else ""
         return (
             f"{task_block}\n\n"
             f"{state_block}\n\n"
+            f"{summary_section}"
             "Stall recovery violation:\n"
             "Your previous choice violated the stall recovery constraint.\n"
             f"Attempted action: kind={attempted_kind} tool={attempted_tool} args={attempted_args or '{}'}\n\n"
@@ -538,15 +588,19 @@ class ModelDrivenPolicy(Policy):
         error_message: str,
         failure_memory: list[dict[str, Any]],
         history: list[dict[str, Any]],
+        history_summary: dict[str, Any] | None = None,
     ) -> str:
         task_block = ModelDrivenPolicy._render_task_context(task)
         state_block = ModelDrivenPolicy._render_state_and_progress(
             task=task, history=history
         )
+        summary_block = ModelDrivenPolicy._render_history_summary_block(history_summary)
         contract = ModelDrivenPolicy._decision_contract()
+        summary_section = f"{summary_block}\n\n" if summary_block else ""
         return (
             f"{task_block}\n\n"
             f"{state_block}\n\n"
+            f"{summary_section}"
             "Prior failures:\n"
             f"{failure_memory}\n\n"
             "Most recent failure:\n"
@@ -554,6 +608,180 @@ class ModelDrivenPolicy(Policy):
             "Choose the next action. Prefer a different approach that can still complete the task.\n\n"
             f"{contract}"
         )
+
+    def _maybe_refresh_history_summary(
+        self,
+        *,
+        task: str,
+        agent: dict[str, Any],
+        context: PlanContext,
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        run_id = str(context.get("run_id") or "").strip()
+        if not run_id:
+            return {}
+        if len(history) < self._SUMMARY_MIN_HISTORY:
+            return {}
+
+        summarizer = getattr(self.model_gateway, "summarize_context", None)
+        if not callable(summarizer):
+            return {}
+
+        target_through = len(history) - self._SUMMARY_KEEP_RECENT
+        if target_through <= 0:
+            return {}
+
+        cache = dict(self._history_summary_cache.get(run_id) or {})
+        summary = cache.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        summarized_through = int(cache.get("summarized_through") or 0)
+        failed_target = int(cache.get("failed_target") or -1)
+
+        should_refresh = (
+            not summary
+            or summarized_through > target_through
+            or target_through - summarized_through >= self._SUMMARY_REFRESH_STRIDE
+        )
+        if not should_refresh:
+            return dict(summary)
+        if failed_target == target_through:
+            return dict(summary)
+
+        older_history = history[:target_through]
+        trimmed_older = older_history[-self._SUMMARY_MAX_INPUT_STEPS :]
+        state = {
+            "previous_summary": summary,
+            "older_history_count": len(older_history),
+            "older_history_window_start": max(0, target_through - len(trimmed_older)),
+            "older_history_window_end": max(0, target_through - 1),
+            "older_history": self._compact_history_for_summary(trimmed_older),
+            "recent_history": self._compact_history_for_summary(
+                history[target_through:]
+            ),
+        }
+        response = summarizer(
+            task=task,
+            agent=agent,
+            context={"run_id": run_id, "step_limit": context.get("step_limit")},
+            state=state,
+        )
+        if isinstance(response, dict) and response.get("ok"):
+            refreshed = response.get("summary")
+            if isinstance(refreshed, dict) and refreshed:
+                self._history_summary_cache[run_id] = {
+                    "summary": dict(refreshed),
+                    "summarized_through": target_through,
+                    "failed_target": -1,
+                }
+                return dict(refreshed)
+
+        self._history_summary_cache[run_id] = {
+            "summary": dict(summary),
+            "summarized_through": summarized_through,
+            "failed_target": target_through,
+        }
+        return dict(summary)
+
+    @staticmethod
+    def _compact_history_for_summary(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        compact: list[dict[str, Any]] = []
+        for item in history:
+            step_type = str(item.get("step_type") or "")
+            entry: dict[str, Any] = {"step_type": step_type or "unknown"}
+            if step_type == "tool":
+                tool_input = dict(item.get("input") or {})
+                output = dict(item.get("output") or {})
+                entry["tool_name"] = str(tool_input.get("tool_name") or "")
+                entry["status"] = "ok" if output.get("ok") else "failed"
+                args = dict(tool_input.get("args") or {})
+                args_text = ModelDrivenPolicy._compact_args(args, max_len=180)
+                if args_text:
+                    entry["args"] = args_text
+                summary = ModelDrivenPolicy._compact_text(
+                    ModelDrivenPolicy._summarize_tool_output(output),
+                    max_len=220,
+                )
+                if summary:
+                    entry["result"] = summary
+                if not output.get("ok"):
+                    error = output.get("error")
+                    if isinstance(error, dict):
+                        entry["error"] = ModelDrivenPolicy._compact_text(
+                            f"{error.get('code') or 'error'}: {error.get('message') or ''}",
+                            max_len=160,
+                        )
+                compact.append(entry)
+                continue
+
+            if step_type in {"ask_user", "verify", "eval", "plan"}:
+                output = dict(item.get("output") or {})
+                status = "ok" if output.get("ok", True) else "failed"
+                entry["status"] = status
+                compact.append(entry)
+                continue
+
+            compact.append(entry)
+        return compact
+
+    @staticmethod
+    def _compact_text(text: str, max_len: int) -> str:
+        value = " ".join(str(text or "").split()).strip()
+        if not value:
+            return ""
+        if len(value) <= max_len:
+            return value
+        return value[:max_len].rstrip() + "..."
+
+    @staticmethod
+    def _render_history_summary_block(history_summary: dict[str, Any] | None) -> str:
+        if not isinstance(history_summary, dict) or not history_summary:
+            return ""
+
+        def _items(key: str, *, limit: int = 5) -> list[str]:
+            raw = history_summary.get(key)
+            if not isinstance(raw, list):
+                return []
+            items: list[str] = []
+            for value in raw:
+                text = ModelDrivenPolicy._compact_text(value, max_len=180)
+                if not text:
+                    continue
+                items.append(text)
+                if len(items) >= limit:
+                    break
+            return items
+
+        objective_status = ModelDrivenPolicy._compact_text(
+            history_summary.get("objective_status"), max_len=220
+        )
+        progress_summary = ModelDrivenPolicy._compact_text(
+            history_summary.get("progress_summary"), max_len=260
+        )
+        completed = _items("completed_milestones")
+        open_issues = _items("open_issues")
+        attempted = _items("attempted_paths")
+        constraints = _items("constraints")
+        next_focus = _items("next_focus", limit=4)
+
+        lines: list[str] = ["Historical context summary:"]
+        if objective_status:
+            lines.append(f"- Objective status: {objective_status}")
+        if progress_summary:
+            lines.append(f"- Progress summary: {progress_summary}")
+        if completed:
+            lines.append("- Completed milestones: " + "; ".join(completed))
+        if open_issues:
+            lines.append("- Open issues: " + "; ".join(open_issues))
+        if attempted:
+            lines.append("- Attempted paths: " + "; ".join(attempted))
+        if constraints:
+            lines.append("- Constraints: " + "; ".join(constraints))
+        if next_focus:
+            lines.append("- Next focus: " + "; ".join(next_focus))
+        if len(lines) == 1:
+            return ""
+        return "\n".join(lines)
 
     @staticmethod
     def _render_recent_history(history: list[dict[str, Any]], limit: int = 6) -> str:

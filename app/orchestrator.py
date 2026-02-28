@@ -223,7 +223,7 @@ class Orchestrator:
                 context={
                     "run_id": run_id,
                     "step_limit": step_limit,
-                    "history": history,
+                    "history": history[-8:],
                     "failure_memory": self._build_failure_memory(history),
                     "supervisor": directive_payload,
                 },

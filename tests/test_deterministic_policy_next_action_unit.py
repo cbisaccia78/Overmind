@@ -7,10 +7,30 @@ class _QueueGateway:
     def __init__(self, responses: list[dict]):
         self.responses = list(responses)
         self.calls: list[dict] = []
+        self.summary_calls: list[dict] = []
 
     def infer(self, *, task: str, agent: dict, context: dict) -> dict:
         self.calls.append({"task": task, "agent": agent, "context": context})
         return self.responses.pop(0)
+
+    def summarize_context(
+        self, *, task: str, agent: dict, context: dict, state: dict
+    ) -> dict:
+        self.summary_calls.append(
+            {"task": task, "agent": agent, "context": context, "state": state}
+        )
+        return {
+            "ok": True,
+            "summary": {
+                "objective_status": "collect stories from Google News home feed",
+                "progress_summary": "navigated and captured initial snapshot",
+                "completed_milestones": ["open homepage"],
+                "open_issues": ["need to scroll for new items"],
+                "attempted_paths": ["mcp.playwright.browser_snapshot -> ok"],
+                "constraints": [],
+                "next_focus": ["extract stories and then scroll once"],
+            },
+        }
 
 
 def test_next_action_uses_model_for_first_step():
@@ -636,3 +656,97 @@ def test_next_action_includes_supervisor_directive_when_present():
     assert "Supervisor directive:" in prompt
     assert "- Mode: execution" in prompt
     assert "- Phase: execute_objective" in prompt
+
+
+def test_next_action_includes_model_context_summary_for_long_history():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "final_answer",
+                "args": {"message": "done"},
+            }
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    history = []
+    for _ in range(12):
+        history.append(
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True, "observation": {"summary": "snapshot ok"}},
+            }
+        )
+
+    _ = policy.next_action(
+        "collect stories",
+        agent={"tools_allowed": ["mcp.playwright.browser_snapshot", "final_answer"]},
+        context={"run_id": "r-summary"},
+        history=history,
+    )
+
+    prompt = gateway.calls[0]["task"]
+    assert "Historical context summary:" in prompt
+    assert "Objective status: collect stories from Google News home feed" in prompt
+    assert "Next focus: extract stories and then scroll once" in prompt
+    assert len(gateway.summary_calls) == 1
+
+
+def test_next_action_reuses_cached_context_summary_until_stride_crossed():
+    gateway = _QueueGateway(
+        [
+            {
+                "ok": True,
+                "tool_name": "final_answer",
+                "args": {"message": "done"},
+            },
+            {
+                "ok": True,
+                "tool_name": "final_answer",
+                "args": {"message": "done"},
+            },
+        ]
+    )
+    policy = ModelDrivenPolicy(model_gateway=gateway)
+
+    base_history = []
+    for _ in range(12):
+        base_history.append(
+            {
+                "step_type": "tool",
+                "input": {"tool_name": "mcp.playwright.browser_snapshot", "args": {}},
+                "output": {"ok": True, "observation": {"summary": "snapshot ok"}},
+            }
+        )
+
+    _ = policy.next_action(
+        "collect stories",
+        agent={"tools_allowed": ["mcp.playwright.browser_snapshot", "final_answer"]},
+        context={"run_id": "r-summary-cache"},
+        history=base_history,
+    )
+    assert len(gateway.summary_calls) == 1
+
+    extended_history = list(base_history)
+    extended_history.append(
+        {
+            "step_type": "tool",
+            "input": {"tool_name": "mcp.playwright.browser_evaluate", "args": {}},
+            "output": {"ok": True, "observation": {"summary": "evaluate ok"}},
+        }
+    )
+    _ = policy.next_action(
+        "collect stories",
+        agent={
+            "tools_allowed": [
+                "mcp.playwright.browser_snapshot",
+                "mcp.playwright.browser_evaluate",
+                "final_answer",
+            ]
+        },
+        context={"run_id": "r-summary-cache"},
+        history=extended_history,
+    )
+    assert len(gateway.summary_calls) == 1

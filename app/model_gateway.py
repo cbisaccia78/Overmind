@@ -293,6 +293,122 @@ class ModelGateway:
         result["latency_ms"] = latency_ms
         return result
 
+    def summarize_context(
+        self,
+        *,
+        task: str,
+        agent: dict[str, Any],
+        context: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a compact rolling context summary for long-running loops."""
+        model = str(agent.get("model") or "stub-v1")
+        request_json = {
+            "kind": "context_summary",
+            "task": task,
+            "agent_id": agent.get("id"),
+            "model": model,
+            "context": context,
+            "state": state,
+        }
+        run_id = str(context.get("run_id") or "").strip()
+        self._emit_run_event(
+            run_id=run_id,
+            event_type="model.infer.started",
+            payload={
+                "run_id": run_id,
+                "kind": "context_summary",
+                "model": model,
+            },
+        )
+
+        start = time.monotonic()
+        try:
+            model_name = str(model or "").strip().lower()
+            if model_name.startswith("deepseek") and os.getenv("DEEPSEEK_API_KEY"):
+                raw = self._summarize_context_with_openai_compatible(
+                    model=model,
+                    provider="deepseek",
+                    api_key=os.getenv("DEEPSEEK_API_KEY") or "",
+                    endpoint=os.getenv(
+                        "OVERMIND_DEEPSEEK_CHAT_COMPLETIONS_URL",
+                        "https://api.deepseek.com/v1/chat/completions",
+                    ),
+                    task=task,
+                    state=state,
+                )
+            elif os.getenv("OPENAI_API_KEY"):
+                raw = self._summarize_context_with_openai_responses(
+                    model=model,
+                    api_key=os.getenv("OPENAI_API_KEY") or "",
+                    endpoint=os.getenv(
+                        "OVERMIND_OPENAI_RESPONSES_URL",
+                        "https://api.openai.com/v1/responses",
+                    ),
+                    task=task,
+                    state=state,
+                )
+            else:
+                raw = self._summarize_context_with_model(task=task, state=state)
+
+            summary = self._sanitize_context_summary(raw)
+            response_json = {"summary": summary}
+            usage_json = self._estimate_usage(task=task, response=response_json)
+            result: dict[str, Any] = {
+                "ok": True,
+                "model": model,
+                "summary": summary,
+                "response": response_json,
+                "usage": usage_json,
+            }
+            self._emit_model_output_events(
+                run_id=run_id,
+                model=model,
+                stream_kind="context_summary",
+                response=response_json,
+            )
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            fallback = self._sanitize_context_summary(
+                self._summarize_context_with_model(task=task, state=state)
+            )
+            response_json = {"summary": fallback}
+            usage_json = self._estimate_usage(task=task, response=response_json)
+            result = {
+                "ok": False,
+                "model": model,
+                "summary": fallback,
+                "error": {"code": "model_error", "message": str(exc)},
+                "response": response_json,
+                "usage": usage_json,
+            }
+            error = str(exc)
+            self._emit_run_event(
+                run_id=run_id,
+                event_type="model.infer.failed",
+                payload={
+                    "run_id": run_id,
+                    "kind": "context_summary",
+                    "model": model,
+                    "error": error,
+                },
+            )
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if self.repo is not None:
+            self.repo.create_model_call(
+                run_id=context.get("run_id"),
+                agent_id=agent.get("id"),
+                model=model,
+                request_json=request_json,
+                response_json=result.get("response", {}),
+                usage_json=result.get("usage", {}),
+                error=error,
+                latency_ms=latency_ms,
+            )
+        result["latency_ms"] = latency_ms
+        return result
+
     def _emit_run_event(
         self,
         *,
@@ -401,6 +517,14 @@ class ModelGateway:
             )
             if advice_text:
                 segments.append({"channel": "advice", "text": advice_text})
+
+        summary_payload = payload.get("summary")
+        if isinstance(summary_payload, dict) and summary_payload:
+            summary_text = self._streamable_text(
+                json.dumps(summary_payload, indent=2, ensure_ascii=True)
+            )
+            if summary_text:
+                segments.append({"channel": "summary", "text": summary_text})
 
         if segments:
             return segments
@@ -552,6 +676,114 @@ class ModelGateway:
             )
         return self._parse_supervisor_json_response(data)
 
+    def _summarize_context_with_openai_responses(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        endpoint: str,
+        task: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Request structured context summary via OpenAI Responses API."""
+        payload = {
+            "model": model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": self._context_summary_system_prompt(),
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": self._context_summary_user_prompt(
+                                task=task,
+                                state=state,
+                            ),
+                        }
+                    ],
+                },
+            ],
+            "temperature": 0,
+        }
+        payload, used_reasoning = self._apply_reasoning_request_tuning(
+            payload=payload,
+            model=model,
+            provider="openai",
+        )
+        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        try:
+            data = self._request_openai_responses(
+                payload=payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        except RuntimeError:
+            if not used_reasoning:
+                raise
+            data = self._request_openai_responses(
+                payload=self._strip_reasoning_request_tuning(payload),
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        return self._parse_supervisor_json_response(data)
+
+    def _summarize_context_with_openai_compatible(
+        self,
+        *,
+        model: str,
+        provider: str,
+        api_key: str,
+        endpoint: str,
+        task: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Request structured context summary via OpenAI-compatible chat API."""
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._context_summary_system_prompt()},
+                {
+                    "role": "user",
+                    "content": self._context_summary_user_prompt(task=task, state=state),
+                },
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        payload, used_reasoning = self._apply_reasoning_request_tuning(
+            payload=payload,
+            model=model,
+            provider=provider,
+        )
+        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        try:
+            data = self._request_openai_api(
+                payload=payload,
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        except RuntimeError:
+            if not used_reasoning:
+                raise
+            data = self._request_openai_api(
+                payload=self._strip_reasoning_request_tuning(payload),
+                api_key=api_key,
+                endpoint=endpoint,
+                timeout_s=timeout_s,
+            )
+        return self._parse_supervisor_json_response(data)
+
     @staticmethod
     def _supervisor_system_prompt() -> str:
         return (
@@ -576,6 +808,35 @@ class ModelGateway:
             "Current state snapshot (JSON):\n"
             f"{compact_state}\n\n"
             "Return the next advisory directive JSON."
+        )
+
+    @staticmethod
+    def _context_summary_system_prompt() -> str:
+        return (
+            "You summarize long-running agent context into compact structured memory.\n"
+            "Return only one JSON object with keys:\n"
+            "objective_status, progress_summary, completed_milestones, open_issues, "
+            "attempted_paths, constraints, next_focus.\n"
+            "Rules:\n"
+            "- Keep statements factual and concise.\n"
+            "- Preserve concrete identifiers (tool names, URLs, file paths, error codes) when present.\n"
+            "- Do not invent facts; if unknown, say unknown or leave list empty.\n"
+            "- completed_milestones/open_issues/attempted_paths/constraints: 0-6 short items each.\n"
+            "- next_focus: 1-4 actionable items.\n"
+            "- No markdown, no prose outside JSON."
+        )
+
+    @staticmethod
+    def _context_summary_user_prompt(task: str, state: dict[str, Any]) -> str:
+        compact_state = json.dumps(state, separators=(",", ":"), ensure_ascii=True)
+        if len(compact_state) > 7000:
+            compact_state = compact_state[:7000] + "..."
+        return (
+            "Goal:\n"
+            f"{task.strip()}\n\n"
+            "Context state to summarize (JSON):\n"
+            f"{compact_state}\n\n"
+            "Return compact rolling context summary JSON."
         )
 
     def _parse_supervisor_json_response(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -736,6 +997,75 @@ class ModelGateway:
             "success_criteria": success_criteria,
         }
 
+    def _summarize_context_with_model(
+        self, *, task: str, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Deterministic fallback context summary for local/dev operation."""
+        previous_summary = state.get("previous_summary")
+        if not isinstance(previous_summary, dict):
+            previous_summary = {}
+
+        older_history = state.get("older_history")
+        if not isinstance(older_history, list):
+            older_history = []
+
+        completed_milestones: list[str] = []
+        open_issues: list[str] = []
+        attempted_paths: list[str] = []
+        constraints: list[str] = []
+
+        for item in older_history:
+            if not isinstance(item, dict):
+                continue
+            step_type = str(item.get("step_type") or "")
+            tool_name = str(item.get("tool_name") or "")
+            status = str(item.get("status") or "")
+            if step_type == "tool" and tool_name:
+                attempted_paths.append(f"{tool_name} -> {status or 'unknown'}")
+                if status == "ok":
+                    completed_milestones.append(f"{tool_name} succeeded")
+                elif status == "failed":
+                    error = str(item.get("error") or "").strip()
+                    if error:
+                        open_issues.append(error)
+                    else:
+                        open_issues.append(f"{tool_name} failed")
+            elif step_type == "ask_user":
+                constraints.append("workflow requested user input")
+
+        objective_status = str(previous_summary.get("objective_status") or "").strip()
+        if not objective_status:
+            objective_status = f"working toward: {str(task or '').strip()[:180]}"
+        progress_summary = str(previous_summary.get("progress_summary") or "").strip()
+        if not progress_summary:
+            progress_summary = (
+                f"tracked {len(older_history)} prior step(s); latest retained as recent raw history"
+            )
+
+        next_focus_items = []
+        raw_next_focus = previous_summary.get("next_focus")
+        if isinstance(raw_next_focus, list):
+            for item in raw_next_focus:
+                text = str(item or "").strip()
+                if text:
+                    next_focus_items.append(text)
+                if len(next_focus_items) >= 4:
+                    break
+        if not next_focus_items:
+            next_focus_items = [
+                "use recent raw history to choose one materially different next action"
+            ]
+
+        return {
+            "objective_status": objective_status,
+            "progress_summary": progress_summary,
+            "completed_milestones": completed_milestones[:6],
+            "open_issues": open_issues[:6],
+            "attempted_paths": attempted_paths[:6],
+            "constraints": constraints[:6],
+            "next_focus": next_focus_items[:4],
+        }
+
     @staticmethod
     def _sanitize_supervisor_advice(advice: dict[str, Any] | None) -> dict[str, Any]:
         """Clamp advisory output to safe deterministic schema bounds."""
@@ -780,6 +1110,57 @@ class ModelGateway:
             "rationale": rationale,
             "micro_plan": micro_plan,
             "success_criteria": success_criteria,
+        }
+
+    @staticmethod
+    def _sanitize_context_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+        """Clamp context summary output to bounded, prompt-safe schema."""
+        payload = summary if isinstance(summary, dict) else {}
+
+        def _clean_text(value: Any, max_len: int) -> str:
+            text = " ".join(str(value or "").split()).strip()
+            if not text:
+                return ""
+            if len(text) <= max_len:
+                return text
+            return text[:max_len].rstrip() + "..."
+
+        def _clean_items(value: Any, max_items: int, max_len: int = 180) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            items: list[str] = []
+            for item in value:
+                text = _clean_text(item, max_len)
+                if not text:
+                    continue
+                items.append(text)
+                if len(items) >= max_items:
+                    break
+            return items
+
+        objective_status = (
+            _clean_text(payload.get("objective_status"), 240) or "objective status unknown"
+        )
+        progress_summary = (
+            _clean_text(payload.get("progress_summary"), 280)
+            or "no material progress summary available"
+        )
+        completed_milestones = _clean_items(payload.get("completed_milestones"), 6)
+        open_issues = _clean_items(payload.get("open_issues"), 6)
+        attempted_paths = _clean_items(payload.get("attempted_paths"), 6)
+        constraints = _clean_items(payload.get("constraints"), 6)
+        next_focus = _clean_items(payload.get("next_focus"), 4)
+        if not next_focus:
+            next_focus = ["pick one next action that changes task-relevant state"]
+
+        return {
+            "objective_status": objective_status,
+            "progress_summary": progress_summary,
+            "completed_milestones": completed_milestones,
+            "open_issues": open_issues,
+            "attempted_paths": attempted_paths,
+            "constraints": constraints,
+            "next_focus": next_focus,
         }
 
     def _should_use_deepseek(self, *, model: str, allowed_tools: list[str]) -> bool:
