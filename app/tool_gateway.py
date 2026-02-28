@@ -208,15 +208,50 @@ class ToolGateway:
         config: LocalMcpServerConfig,
         remote_tool_name: str,
     ) -> Callable[..., dict[str, Any]]:
-        def _handler(args: dict[str, Any], run_id: str | None = None) -> dict[str, Any]:
+        def _handler(
+            args: dict[str, Any],
+            run_id: str | None = None,
+            session_key: str | None = None,
+        ) -> dict[str, Any]:
+            session_cwd: str | None = None
+            if run_id:
+                session_cwd = self._mcp_artifact_cwd(
+                    run_id=run_id,
+                    server_id=config.id,
+                )
             return call_local_mcp_tool(
                 config=config,
                 remote_name=remote_tool_name,
                 args=args,
-                session_key=run_id,
+                session_key=session_key,
+                session_cwd=session_cwd,
             )
 
         return _handler
+
+    @staticmethod
+    def _safe_path_component(value: str, *, fallback: str) -> str:
+        """Normalize one filesystem path component."""
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+        cleaned = cleaned.strip("._-")
+        return cleaned or fallback
+
+    def _mcp_artifact_cwd(self, *, run_id: str, server_id: str) -> str:
+        """Return/create per-run MCP artifact directory inside workspace."""
+        run_part = self._safe_path_component(run_id, fallback="run")
+        server_part = self._safe_path_component(server_id, fallback="server")
+        target = (
+            self.workspace_root
+            / ".overmind_runs"
+            / run_part
+            / "artifacts"
+            / "mcp"
+            / server_part
+        ).resolve()
+        if not str(target).startswith(str(self.workspace_root)):
+            raise ValueError("artifact directory escapes workspace")
+        target.mkdir(parents=True, exist_ok=True)
+        return str(target)
 
     def list_local_mcp_servers(self) -> list[LocalMcpServerConfig]:
         """Return local MCP server configs from app settings."""
@@ -549,11 +584,19 @@ class ToolGateway:
             if isinstance(validated, dict) and validated.get("ok") is False:
                 return validated
             if tool_name.startswith("mcp."):
-                return spec.handler(validated, run_id=mcp_session_key)
+                return spec.handler(
+                    validated,
+                    run_id=run_id,
+                    session_key=mcp_session_key,
+                )
             return spec.handler(validated)
 
         if tool_name.startswith("mcp."):
-            return spec.handler(args, run_id=mcp_session_key)
+            return spec.handler(
+                args,
+                run_id=run_id,
+                session_key=mcp_session_key,
+            )
         return spec.handler(args)
 
     def _validate_args(self, spec: ToolSpec, args: dict[str, Any]) -> dict[str, Any]:

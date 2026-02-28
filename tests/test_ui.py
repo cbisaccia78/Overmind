@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import json
+from urllib import error as urlerror
 
 import app.main as main_module
 
@@ -51,6 +52,41 @@ def test_agents_page_model_dropdown_uses_active_provider_models(client, monkeypa
     assert agents.status_code == 200
     assert 'name="model"' in agents.text
     assert "OpenAI · gpt-4.1-mini" in agents.text
+    assert "DeepSeek · deepseek-chat" in agents.text
+
+
+def test_agents_page_model_dropdown_uses_deepseek_models_fallback_endpoint(
+    client, monkeypatch
+):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+
+    class _Resp:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _urlopen(req, timeout=10):
+        del timeout
+        url = req.full_url
+        if url.rstrip("/") == "https://api.deepseek.com/v1/models":
+            raise urlerror.HTTPError(url=url, code=404, msg="not found", hdrs=None, fp=None)
+        if url.rstrip("/") == "https://api.deepseek.com/models":
+            return _Resp({"data": [{"id": "deepseek-chat"}]})
+        return _Resp({"data": []})
+
+    monkeypatch.setattr(main_module.urlrequest, "urlopen", _urlopen)
+
+    agents = client.get("/agents")
+    assert agents.status_code == 200
     assert "DeepSeek · deepseek-chat" in agents.text
 
 

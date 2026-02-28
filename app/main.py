@@ -216,6 +216,23 @@ def _test_api_key(
         return False, f"{provider_name} key test failed: {exc}"
 
 
+def _test_api_key_endpoints(
+    *, api_key: str, endpoints: list[str], provider_name: str
+) -> tuple[bool, str]:
+    """Validate API key against one or more endpoints."""
+    last_message = f"{provider_name} key test failed: no endpoint configured"
+    for endpoint in endpoints:
+        ok, message = _test_api_key(
+            api_key=api_key,
+            endpoint=endpoint,
+            provider_name=provider_name,
+        )
+        if ok:
+            return ok, message
+        last_message = message
+    return False, last_message
+
+
 def _test_openai_key(api_key: str) -> tuple[bool, str]:
     """Validate OpenAI key by calling the models endpoint."""
     return _test_api_key(
@@ -229,23 +246,59 @@ def _test_openai_key(api_key: str) -> tuple[bool, str]:
 
 def _test_deepseek_key(api_key: str) -> tuple[bool, str]:
     """Validate DeepSeek key by calling the models endpoint."""
-    return _test_api_key(
+    return _test_api_key_endpoints(
         api_key=api_key,
-        endpoint=os.getenv(
-            "OVERMIND_DEEPSEEK_MODELS_URL", "https://api.deepseek.com/v1/models"
-        ),
+        endpoints=_deepseek_model_endpoints(),
         provider_name="DeepSeek",
     )
 
 
-def _provider_key_status(
-    *, setting_key: str, env_key: str
-) -> tuple[bool, str | None]:
-    """Return (configured, masked) status for a provider API key."""
-    stored = _services().repo.get_setting(setting_key)
-    active = os.getenv(env_key)
-    key = active or stored
-    return bool(key), _mask_api_key(key) if key else None
+def _deepseek_model_endpoints() -> list[str]:
+    """Return DeepSeek model-discovery endpoints in preference order."""
+    configured = str(os.getenv("OVERMIND_DEEPSEEK_MODELS_URL") or "").strip()
+    if configured:
+        return [configured]
+    return [
+        "https://api.deepseek.com/v1/models",
+        "https://api.deepseek.com/models",
+    ]
+
+
+def _extract_model_ids(payload: Any) -> list[str]:
+    """Extract model identifiers from provider model list payloads."""
+    data: Any = payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), list):
+            data = payload.get("data")
+        elif isinstance(payload.get("models"), list):
+            data = payload.get("models")
+        else:
+            data = []
+
+    if not isinstance(data, list):
+        return []
+
+    models: list[str] = []
+    for item in data:
+        if isinstance(item, str):
+            model_id = item.strip()
+        elif isinstance(item, dict):
+            model_id = str(
+                item.get("id") or item.get("model") or item.get("name") or ""
+            ).strip()
+        else:
+            model_id = ""
+        if model_id:
+            models.append(model_id)
+    return sorted(set(models))
+
+
+def _fetch_provider_models_from_endpoints(*, api_key: str, endpoints: list[str]) -> list[str]:
+    """Fetch model IDs from one or more provider endpoints."""
+    discovered: list[str] = []
+    for endpoint in endpoints:
+        discovered.extend(_fetch_provider_models(api_key=api_key, endpoint=endpoint))
+    return sorted(set(discovered))
 
 
 def _fetch_provider_models(*, api_key: str, endpoint: str) -> list[str]:
@@ -263,17 +316,7 @@ def _fetch_provider_models(*, api_key: str, endpoint: str) -> list[str]:
     except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError):
         return []
 
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return []
-    models: list[str] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        model_id = str(item.get("id") or "").strip()
-        if model_id:
-            models.append(model_id)
-    return sorted(set(models))
+    return _extract_model_ids(payload)
 
 
 def _available_remote_models() -> list[dict[str, str]]:
@@ -304,11 +347,9 @@ def _available_remote_models() -> list[dict[str, str]]:
         "deepseek_api_key"
     )
     if deepseek_key:
-        for model_id in _fetch_provider_models(
+        for model_id in _fetch_provider_models_from_endpoints(
             api_key=deepseek_key,
-            endpoint=os.getenv(
-                "OVERMIND_DEEPSEEK_MODELS_URL", "https://api.deepseek.com/v1/models"
-            ),
+            endpoints=_deepseek_model_endpoints(),
         ):
             options.append(
                 {
@@ -327,6 +368,16 @@ def _available_remote_models() -> list[dict[str, str]]:
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def _provider_key_status(
+    *, setting_key: str, env_key: str
+) -> tuple[bool, str | None]:
+    """Return (configured, masked) status for a provider API key."""
+    stored = _services().repo.get_setting(setting_key)
+    active = os.getenv(env_key)
+    key = active or stored
+    return bool(key), _mask_api_key(key) if key else None
 
 
 async def _parse_urlencoded_form(request: Request) -> dict[str, str]:

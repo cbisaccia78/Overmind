@@ -187,16 +187,24 @@ def test_call_tool_success_error_and_session_paths(
             return {"isError": False, "content": [{"type": "text", "text": "session"}]}
 
     session = _FakeSession()
-    monkeypatch.setattr(mcp_local, "_get_or_create_session", lambda **_: session)
+    session_requests: list[dict[str, object]] = []
+
+    def _fake_get_or_create_session(**kwargs):
+        session_requests.append(dict(kwargs))
+        return session
+
+    monkeypatch.setattr(mcp_local, "_get_or_create_session", _fake_get_or_create_session)
     via_session = mcp_local.call_tool(
         config,
         "echo",
         {"text": "x"},
         timeout_s=5,
         session_key="run-1",
+        session_cwd="/tmp/run-1/artifacts",
     )
     assert via_session["ok"] is True
     assert session.calls == [("echo", {"text": "x"}, 5)]
+    assert session_requests and session_requests[0]["cwd"] == "/tmp/run-1/artifacts"
 
 
 def test_structured_observation_extracts_generic_page_metadata() -> None:
@@ -284,9 +292,14 @@ def test_close_sessions_and_get_or_create_session_paths(
     preexisting = _Session()
 
     class _CreatedSession(_Session):
-        def __init__(self, config: mcp_local.LocalMcpServerConfig, timeout_s: int):
+        def __init__(
+            self,
+            config: mcp_local.LocalMcpServerConfig,
+            timeout_s: int,
+            cwd: str | None = None,
+        ):
             super().__init__()
-            del timeout_s
+            del timeout_s, cwd
             with mcp_local._SESSIONS_LOCK:
                 mcp_local._SESSIONS[(config.id, "race")] = preexisting
 

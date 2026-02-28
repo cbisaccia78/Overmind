@@ -214,13 +214,22 @@ def test_mcp_dispatch_passes_run_id_as_session_key(tmp_path: Path, monkeypatch):
 
     calls: list[dict] = []
 
-    def _fake_call_tool(*, config, remote_name, args, session_key=None, timeout_s=20):
+    def _fake_call_tool(
+        *,
+        config,
+        remote_name,
+        args,
+        session_key=None,
+        session_cwd=None,
+        timeout_s=20,
+    ):
         calls.append(
             {
                 "config": config,
                 "remote_name": remote_name,
                 "args": args,
                 "session_key": session_key,
+                "session_cwd": session_cwd,
                 "timeout_s": timeout_s,
             }
         )
@@ -246,6 +255,11 @@ def test_mcp_dispatch_passes_run_id_as_session_key(tmp_path: Path, monkeypatch):
 
     assert result["ok"] is True
     assert calls and calls[0]["session_key"] == "run-123"
+    expected_cwd = (
+        tmp_path / ".overmind_runs" / "run-123" / "artifacts" / "mcp" / "browser"
+    )
+    assert calls and calls[0]["session_cwd"] == str(expected_cwd)
+    assert expected_cwd.exists()
 
 
 def test_mcp_dispatch_without_step_id_uses_ephemeral_session(
@@ -277,8 +291,17 @@ def test_mcp_dispatch_without_step_id_uses_ephemeral_session(
 
     calls: list[dict] = []
 
-    def _fake_call_tool(*, config, remote_name, args, session_key=None, timeout_s=20):
-        calls.append({"session_key": session_key})
+    def _fake_call_tool(
+        *,
+        config,
+        remote_name,
+        args,
+        session_key=None,
+        session_cwd=None,
+        timeout_s=20,
+    ):
+        del config, remote_name, args, timeout_s
+        calls.append({"session_key": session_key, "session_cwd": session_cwd})
         return {"ok": True}
 
     monkeypatch.setattr("app.tool_gateway.call_local_mcp_tool", _fake_call_tool)
@@ -301,3 +324,8 @@ def test_mcp_dispatch_without_step_id_uses_ephemeral_session(
 
     assert result["ok"] is True
     assert calls and calls[0]["session_key"] is None
+    expected_cwd = (
+        tmp_path / ".overmind_runs" / "run-adhoc" / "artifacts" / "mcp" / "browser"
+    )
+    assert calls and calls[0]["session_cwd"] == str(expected_cwd)
+    assert expected_cwd.exists()

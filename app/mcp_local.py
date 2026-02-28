@@ -44,9 +44,15 @@ class LocalMcpTool:
 class _PersistentMcpSession:
     """Thread-hosted persistent MCP client session."""
 
-    def __init__(self, config: LocalMcpServerConfig, timeout_s: int):
+    def __init__(
+        self,
+        config: LocalMcpServerConfig,
+        timeout_s: int,
+        cwd: str | None = None,
+    ):
         self.config = config
         self.timeout_s = timeout_s
+        self.cwd = _normalize_cwd(cwd)
         self.loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = threading.Event()
@@ -62,7 +68,11 @@ class _PersistentMcpSession:
 
     def _run(self) -> None:
         asyncio.set_event_loop(self.loop)
-        self._client = _build_client(self.config, timeout_s=self.timeout_s)
+        self._client = _build_client(
+            self.config,
+            timeout_s=self.timeout_s,
+            cwd=self.cwd,
+        )
         try:
             self.loop.run_until_complete(self._client.__aenter__())
         except Exception as exc:  # noqa: BLE001
@@ -236,14 +246,17 @@ def call_tool(
     args: dict[str, Any],
     timeout_s: int = 20,
     session_key: str | None = None,
+    session_cwd: str | None = None,
 ) -> dict[str, Any]:
     """Invoke one MCP tool on a local server."""
+    normalized_cwd = _normalize_cwd(session_cwd)
     try:
         if session_key:
             session = _get_or_create_session(
                 config=config,
                 session_key=session_key,
                 timeout_s=timeout_s,
+                cwd=normalized_cwd,
             )
             result = session.call_tool(
                 remote_name=remote_name,
@@ -257,6 +270,7 @@ def call_tool(
                     remote_name=remote_name,
                     args=args,
                     timeout_s=timeout_s,
+                    cwd=normalized_cwd,
                 )
             )
     except Exception as exc:
@@ -595,14 +609,24 @@ def _get_or_create_session(
     config: LocalMcpServerConfig,
     session_key: str,
     timeout_s: int,
+    cwd: str | None = None,
 ) -> _PersistentMcpSession:
     cache_key = (config.id, session_key)
     with _SESSIONS_LOCK:
         session = _SESSIONS.get(cache_key)
+    normalized_cwd = _normalize_cwd(cwd)
     if session is not None:
-        return session
+        if (str(getattr(session, "cwd", "")).strip() or None) == normalized_cwd:
+            return session
+        with _SESSIONS_LOCK:
+            _SESSIONS.pop(cache_key, None)
+        session.close()
 
-    created = _PersistentMcpSession(config=config, timeout_s=timeout_s)
+    created = _PersistentMcpSession(
+        config=config,
+        timeout_s=timeout_s,
+        cwd=normalized_cwd,
+    )
     with _SESSIONS_LOCK:
         existing = _SESSIONS.get(cache_key)
         if existing is not None:
@@ -638,11 +662,24 @@ def _run_coro(coro: Any) -> Any:
     return result.get("value")
 
 
-def _build_client(config: LocalMcpServerConfig, timeout_s: int) -> Client:
+def _normalize_cwd(cwd: str | None) -> str | None:
+    """Normalize optional cwd to a non-empty string or None."""
+    if cwd is None:
+        return None
+    value = str(cwd).strip()
+    return value or None
+
+
+def _build_client(
+    config: LocalMcpServerConfig,
+    timeout_s: int,
+    cwd: str | None = None,
+) -> Client:
     transport = StdioTransport(
         command=config.command,
         args=config.args,
         env={**os.environ, **config.env},
+        cwd=cwd,
     )
     return Client(transport=transport, timeout=timeout_s)
 
@@ -663,8 +700,9 @@ async def _call_tool_async(
     remote_name: str,
     args: dict[str, Any],
     timeout_s: int,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    client = _build_client(config, timeout_s=timeout_s)
+    client = _build_client(config, timeout_s=timeout_s, cwd=cwd)
     async with client:
         result = await client.call_tool(
             name=remote_name,
