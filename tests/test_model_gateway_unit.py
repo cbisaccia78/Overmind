@@ -343,9 +343,7 @@ def test_infer_with_openai_retries_required_tool_choice_on_missing_tool_call(
                     {
                         "type": "message",
                         "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "No tool yet"}
-                        ],
+                        "content": [{"type": "output_text", "text": "No tool yet"}],
                     }
                 ]
             }
@@ -701,7 +699,9 @@ def test_model_gateway_persists_reasoning_and_tool_call_metadata(tmp_path, monke
     assert result["ok"] is True
     assert result["tool_name"] == "read_file"
     assert result["args"] == {"path": "README.md"}
-    assert result["response"]["reasoning_content"] == "Need file contents before deciding."
+    assert (
+        result["response"]["reasoning_content"] == "Need file contents before deciding."
+    )
     assert result["response"]["assistant_content"] == "Reading file now."
     assert result["response"]["raw_tool_call"]["id"] == "call_reasoning_1"
 
@@ -838,9 +838,7 @@ def test_deepseek_followup_replays_reasoning_content_for_tool_calls(
     assert messages[2] == {"role": "user", "content": "decide the next action"}
 
 
-def test_infer_with_deepseek_applies_thinking_mode_when_enabled(
-    tmp_path, monkeypatch
-):
+def test_infer_with_deepseek_applies_thinking_mode_when_enabled(tmp_path, monkeypatch):
     db_path = str(tmp_path / "model-deepseek-thinking.db")
     init_db(db_path)
     repo = Repository(db_path)
@@ -901,3 +899,34 @@ def test_infer_with_deepseek_applies_thinking_mode_when_enabled(
     assert len(calls) == 1
     assert calls[0]["thinking"] == {"type": "enabled"}
     assert "temperature" not in calls[0]
+
+
+def test_resolve_timeout_default_for_regular_model(monkeypatch):
+    monkeypatch.delenv("OVERMIND_OPENAI_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("OVERMIND_REASONING_TIMEOUT_S", raising=False)
+    assert ModelGateway._resolve_timeout("gpt-4o") == 10
+
+
+def test_resolve_timeout_env_override_for_regular_model(monkeypatch):
+    monkeypatch.setenv("OVERMIND_OPENAI_TIMEOUT_S", "30")
+    monkeypatch.delenv("OVERMIND_REASONING_TIMEOUT_S", raising=False)
+    assert ModelGateway._resolve_timeout("gpt-4o") == 30
+
+
+def test_resolve_timeout_default_for_reasoning_model(monkeypatch):
+    monkeypatch.delenv("OVERMIND_OPENAI_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("OVERMIND_REASONING_TIMEOUT_S", raising=False)
+    assert ModelGateway._resolve_timeout("deepseek-reasoner") == 120
+
+
+def test_resolve_timeout_env_override_for_reasoning_model(monkeypatch):
+    monkeypatch.setenv("OVERMIND_REASONING_TIMEOUT_S", "300")
+    assert ModelGateway._resolve_timeout("deepseek-reasoner") == 300
+    assert ModelGateway._resolve_timeout("o3-mini") == 300
+
+
+def test_resolve_timeout_reasoning_falls_back_to_openai_env(monkeypatch):
+    """When only OVERMIND_OPENAI_TIMEOUT_S is set, reasoning models use it."""
+    monkeypatch.setenv("OVERMIND_OPENAI_TIMEOUT_S", "60")
+    monkeypatch.delenv("OVERMIND_REASONING_TIMEOUT_S", raising=False)
+    assert ModelGateway._resolve_timeout("deepseek-reasoner") == 60

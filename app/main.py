@@ -1289,6 +1289,25 @@ async def provide_run_input_form(run_id: str, request: Request) -> Response:
     return RedirectResponse(url=f"/runs/{run_id}", status_code=303)
 
 
+@app.post("/runs/{run_id}/cancel", response_class=HTMLResponse)
+async def cancel_run_form(run_id: str, request: Request) -> Response:
+    """Cancel a run from the HTML UI and redirect back to runs/detail page."""
+    form = await _parse_urlencoded_form(request)
+    redirect_to = (form.get("redirect_to") or "").strip()
+
+    repo = _services().repo
+    run = repo.get_run(run_id)
+    if not run:
+        return HTMLResponse("Run not found", status_code=404)
+
+    repo.update_run_status(run_id, "canceled")
+    repo.create_event(run_id, "run.canceled", {"run_id": run_id})
+
+    if redirect_to in {"/runs", f"/runs/{run_id}"}:
+        return RedirectResponse(url=redirect_to, status_code=303)
+    return RedirectResponse(url=f"/runs/{run_id}", status_code=303)
+
+
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
     """Render application settings page."""

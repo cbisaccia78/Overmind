@@ -190,6 +190,36 @@ def test_run_detail_followup_input_rejected_when_not_awaiting(client):
     assert "Run is not awaiting input." in rejected.text
 
 
+def test_run_detail_allows_stop_run_from_gui(client):
+    repo = client.app.state.services.repo
+    agent = repo.create_agent(
+        name="ui-stop-detail-agent",
+        role="operator",
+        model="stub-v1",
+        tools_allowed=["store_memory"],
+    )
+    run = repo.create_run(
+        agent_id=agent["id"],
+        task="stop me from detail",
+        step_limit=8,
+    )
+    repo.update_run_status(run["id"], "running")
+
+    detail = client.get(f"/runs/{run['id']}")
+    assert detail.status_code == 200
+    assert "Stop Run" in detail.text
+
+    stopped = client.post(
+        f"/runs/{run['id']}/cancel",
+        data={"redirect_to": f"/runs/{run['id']}"},
+        follow_redirects=False,
+    )
+    assert stopped.status_code == 303
+    assert stopped.headers["location"] == f"/runs/{run['id']}"
+    updated = client.get(f"/api/runs/{run['id']}").json()
+    assert updated["status"] == "canceled"
+
+
 def test_runs_page_shows_provide_input_action_for_awaiting_runs(client):
     repo = client.app.state.services.repo
     agent = repo.create_agent(
@@ -209,6 +239,37 @@ def test_runs_page_shows_provide_input_action_for_awaiting_runs(client):
     assert page.status_code == 200
     assert "Provide Input" in page.text
     assert f"/runs/{run['id']}" in page.text
+
+
+def test_runs_page_allows_stop_run_from_gui(client):
+    repo = client.app.state.services.repo
+    agent = repo.create_agent(
+        name="ui-stop-runs-agent",
+        role="operator",
+        model="stub-v1",
+        tools_allowed=["store_memory"],
+    )
+    run = repo.create_run(
+        agent_id=agent["id"],
+        task="stop me from runs list",
+        step_limit=8,
+    )
+    repo.update_run_status(run["id"], "running")
+
+    page = client.get("/runs")
+    assert page.status_code == 200
+    assert f"/runs/{run['id']}/cancel" in page.text
+    assert "Stop Run" in page.text
+
+    stopped = client.post(
+        f"/runs/{run['id']}/cancel",
+        data={"redirect_to": "/runs"},
+        follow_redirects=False,
+    )
+    assert stopped.status_code == 303
+    assert stopped.headers["location"] == "/runs"
+    updated = client.get(f"/api/runs/{run['id']}").json()
+    assert updated["status"] == "canceled"
 
 
 def test_runs_form_accepts_arbitrary_and_infinite_step_limit(client):

@@ -68,8 +68,16 @@
         <td><span class="pill {% if run.status == 'succeeded' %}pill-good{% elif run.status == 'failed' %}pill-bad{% elif run.status == 'running' %}pill-warn{% else %}pill-neutral{% endif %}">{{ run.status }}</span></td>
         <td>{{ run.created_at }}</td>
         <td>
-          {% if run.status == 'awaiting_input' %}
-          <a class="button primary" href="/runs/{{ run.id }}">Provide Input</a>
+          {% if run.status not in ['succeeded', 'failed', 'canceled'] %}
+          <div class="hero-actions">
+            {% if run.status == 'awaiting_input' %}
+            <a class="button primary" href="/runs/{{ run.id }}">Provide Input</a>
+            {% endif %}
+            <form method="post" action="/runs/{{ run.id }}/cancel" style="display:inline;">
+              <input type="hidden" name="redirect_to" value="/runs" />
+              <button type="submit">Stop Run</button>
+            </form>
+          </div>
           {% else %}
           <span class="muted">—</span>
           {% endif %}

@@ -183,11 +183,12 @@ def test_next_action_missing_tool_call_error_asks_user():
 
 
 def test_next_action_other_inference_error_returns_final_answer():
+    """Non-transient inference errors should still produce a fatal final_answer."""
     gateway = _QueueGateway(
         [
             {
                 "ok": False,
-                "error": {"message": "openai request failed: timeout"},
+                "error": {"message": "openai request failed: invalid JSON"},
             }
         ]
     )
@@ -202,11 +203,11 @@ def test_next_action_other_inference_error_returns_final_answer():
 
     assert action == {
         "kind": "final_answer",
-        "message": "I could not infer the next tool action: openai request failed: timeout",
+        "message": "I could not infer the next tool action: openai request failed: invalid JSON",
         "is_error": True,
         "error": {
             "code": "model_inference_error",
-            "message": "openai request failed: timeout",
+            "message": "openai request failed: invalid JSON",
         },
     }
 
@@ -523,8 +524,8 @@ def test_summarize_tool_output_and_mcp_text_helpers():
                             "text": "### Page\n- Page URL: https://example.com\n### Snapshot\n```yaml\n- huge",
                         },
                     ]
-                }
-            }
+                },
+            },
         }
     )
     assert "Page: Example" in observed_summary
@@ -750,3 +751,40 @@ def test_next_action_reuses_cached_context_summary_until_stride_crossed():
         history=extended_history,
     )
     assert len(gateway.summary_calls) == 1
+
+
+def test_should_ask_user_on_timeout_error():
+    """Timeout errors should be treated as transient (ask_user, not fatal)."""
+    assert (
+        ModelDrivenPolicy._should_ask_user_on_inference_error(
+            "openai request failed: The read operation timed out"
+        )
+        is True
+    )
+
+
+def test_should_ask_user_on_connection_timeout():
+    assert (
+        ModelDrivenPolicy._should_ask_user_on_inference_error(
+            "Connection timeout after 10s"
+        )
+        is True
+    )
+
+
+def test_should_ask_user_on_missing_tool_call():
+    assert (
+        ModelDrivenPolicy._should_ask_user_on_inference_error(
+            "openai response missing valid tool call"
+        )
+        is True
+    )
+
+
+def test_should_not_ask_user_on_generic_error():
+    assert (
+        ModelDrivenPolicy._should_ask_user_on_inference_error(
+            "model returned invalid JSON"
+        )
+        is False
+    )

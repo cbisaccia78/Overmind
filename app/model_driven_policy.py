@@ -306,10 +306,7 @@ class ModelDrivenPolicy(Policy):
                 f"{contract}"
             )
         return (
-            f"{task_block}\n\n"
-            f"{state_block}\n\n"
-            f"{summary_section}"
-            f"{contract}"
+            f"{task_block}\n\n" f"{state_block}\n\n" f"{summary_section}" f"{contract}"
         )
 
     @staticmethod
@@ -360,7 +357,9 @@ class ModelDrivenPolicy(Policy):
         summary_block = ModelDrivenPolicy._render_history_summary_block(history_summary)
         recent = ModelDrivenPolicy._render_recent_history(history)
         contract = ModelDrivenPolicy._decision_contract()
-        blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        blocked = (
+            ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        )
         summary_section = f"{summary_block}\n\n" if summary_block else ""
         return (
             f"{task_block}\n\n"
@@ -401,7 +400,9 @@ class ModelDrivenPolicy(Policy):
         attempted_args = ModelDrivenPolicy._compact_args(
             dict(attempted_action.get("args") or {})
         )
-        blocked = ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        blocked = (
+            ", ".join(f"`{name}`" for name in blocked_tool_names if name) or "none"
+        )
         summary_section = f"{summary_block}\n\n" if summary_block else ""
         return (
             f"{task_block}\n\n"
@@ -430,7 +431,16 @@ class ModelDrivenPolicy(Policy):
     @staticmethod
     def _should_ask_user_on_inference_error(message: str) -> bool:
         lowered = str(message or "").lower()
-        return "openai response missing valid tool call" in lowered
+        if "openai response missing valid tool call" in lowered:
+            return True
+        # Transient network / timeout errors should not kill the run.
+        transient_markers = (
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
+        )
+        return any(marker in lowered for marker in transient_markers)
 
     @staticmethod
     def _action_from_inference(inference: dict[str, Any]) -> dict[str, Any]:
@@ -684,7 +694,9 @@ class ModelDrivenPolicy(Policy):
         return dict(summary)
 
     @staticmethod
-    def _compact_history_for_summary(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _compact_history_for_summary(
+        history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         compact: list[dict[str, Any]] = []
         for item in history:
             step_type = str(item.get("step_type") or "")
@@ -916,7 +928,9 @@ class ModelDrivenPolicy(Policy):
         if not raw:
             return "", []
 
-        markers = list(re.finditer(r"(?:^|\n\n)User input:\s*", raw, flags=re.IGNORECASE))
+        markers = list(
+            re.finditer(r"(?:^|\n\n)User input:\s*", raw, flags=re.IGNORECASE)
+        )
         if not markers:
             return raw, []
 

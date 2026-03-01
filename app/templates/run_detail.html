@@ -11,6 +11,14 @@
     <p><span class="muted">Status</span><br /><span class="pill {% if run.status == 'succeeded' %}pill-good{% elif run.status == 'failed' %}pill-bad{% elif run.status == 'running' %}pill-warn{% else %}pill-neutral{% endif %}">{{ run.status }}</span></p>
     <p><span class="muted">Task</span><br />{{ run.task }}</p>
   </div>
+  {% if run.status not in ['succeeded', 'failed', 'canceled'] %}
+  <div class="hero-actions">
+    <form method="post" action="/runs/{{ run.id }}/cancel">
+      <input type="hidden" name="redirect_to" value="/runs/{{ run.id }}" />
+      <button type="submit">Stop Run</button>
+    </form>
+  </div>
+  {% endif %}
 </section>
 
 <section class="card">

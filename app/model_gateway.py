@@ -598,7 +598,9 @@ class ModelGateway:
                     "content": [
                         {
                             "type": "input_text",
-                            "text": self._supervisor_user_prompt(task=task, state=state),
+                            "text": self._supervisor_user_prompt(
+                                task=task, state=state
+                            ),
                         }
                     ],
                 },
@@ -610,7 +612,7 @@ class ModelGateway:
             model=model,
             provider="openai",
         )
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        timeout_s = self._resolve_timeout(model)
         try:
             data = self._request_openai_responses(
                 payload=payload,
@@ -657,7 +659,7 @@ class ModelGateway:
             model=model,
             provider=provider,
         )
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        timeout_s = self._resolve_timeout(model)
         try:
             data = self._request_openai_api(
                 payload=payload,
@@ -718,7 +720,7 @@ class ModelGateway:
             model=model,
             provider="openai",
         )
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        timeout_s = self._resolve_timeout(model)
         try:
             data = self._request_openai_responses(
                 payload=payload,
@@ -754,7 +756,9 @@ class ModelGateway:
                 {"role": "system", "content": self._context_summary_system_prompt()},
                 {
                     "role": "user",
-                    "content": self._context_summary_user_prompt(task=task, state=state),
+                    "content": self._context_summary_user_prompt(
+                        task=task, state=state
+                    ),
                 },
             ],
             "temperature": 0,
@@ -765,7 +769,7 @@ class ModelGateway:
             model=model,
             provider=provider,
         )
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        timeout_s = self._resolve_timeout(model)
         try:
             data = self._request_openai_api(
                 payload=payload,
@@ -1038,9 +1042,7 @@ class ModelGateway:
             objective_status = f"working toward: {str(task or '').strip()[:180]}"
         progress_summary = str(previous_summary.get("progress_summary") or "").strip()
         if not progress_summary:
-            progress_summary = (
-                f"tracked {len(older_history)} prior step(s); latest retained as recent raw history"
-            )
+            progress_summary = f"tracked {len(older_history)} prior step(s); latest retained as recent raw history"
 
         next_focus_items = []
         raw_next_focus = previous_summary.get("next_focus")
@@ -1096,7 +1098,9 @@ class ModelGateway:
             return items
 
         phase = _clean_text(payload.get("phase"), 64) or "execute_objective"
-        rationale = _clean_text(payload.get("rationale"), 220) or "no rationale provided"
+        rationale = (
+            _clean_text(payload.get("rationale"), 220) or "no rationale provided"
+        )
         micro_plan = _clean_items(payload.get("micro_plan"), 5) or [
             "Take one objective-aligned action.",
             "Validate immediate effect.",
@@ -1139,7 +1143,8 @@ class ModelGateway:
             return items
 
         objective_status = (
-            _clean_text(payload.get("objective_status"), 240) or "objective status unknown"
+            _clean_text(payload.get("objective_status"), 240)
+            or "objective status unknown"
         )
         progress_summary = (
             _clean_text(payload.get("progress_summary"), 280)
@@ -1291,7 +1296,7 @@ class ModelGateway:
             provider="openai",
         )
 
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        timeout_s = self._resolve_timeout(model)
         try:
             data = self._request_openai_responses(
                 payload=payload,
@@ -1408,7 +1413,7 @@ class ModelGateway:
             provider=provider,
         )
 
-        timeout_s = int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+        timeout_s = self._resolve_timeout(model)
         try:
             data = self._request_openai_api(
                 payload=payload,
@@ -1627,9 +1632,7 @@ class ModelGateway:
             try:
                 args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
             except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    "openai response missing valid tool call"
-                ) from exc
+                raise RuntimeError("openai response missing valid tool call") from exc
             if tool_name not in allowed_tools:
                 raise RuntimeError(f"openai selected disallowed tool '{tool_name}'")
             if not isinstance(args, dict):
@@ -1649,7 +1652,9 @@ class ModelGateway:
         if isinstance(args_payload, str):
             args_json = args_payload
         else:
-            args_json = json.dumps(args_payload or {}, separators=(",", ":"), ensure_ascii=True)
+            args_json = json.dumps(
+                args_payload or {}, separators=(",", ":"), ensure_ascii=True
+            )
         return {
             "id": call_id,
             "type": "function",
@@ -1674,7 +1679,13 @@ class ModelGateway:
             tool_name = alias_map.get(raw_tool_name, raw_tool_name)
             args_raw = first_call["function"].get("arguments") or "{}"
             args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-        except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            AttributeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise RuntimeError("openai response missing valid tool call") from exc
 
         if tool_name not in allowed_tools:
@@ -1795,7 +1806,9 @@ class ModelGateway:
             dict(call.get("function")) if isinstance(call.get("function"), dict) else {}
         )
 
-        tool_name = str(function_payload.get("name") or fallback_tool_name or "").strip()
+        tool_name = str(
+            function_payload.get("name") or fallback_tool_name or ""
+        ).strip()
         if not tool_name:
             return {}
         call_id = str(call.get("id") or "").strip()
@@ -1808,7 +1821,9 @@ class ModelGateway:
         else:
             if not isinstance(args_payload, dict):
                 args_payload = fallback_args
-            args_json = json.dumps(args_payload, separators=(",", ":"), ensure_ascii=True)
+            args_json = json.dumps(
+                args_payload, separators=(",", ":"), ensure_ascii=True
+            )
         return {
             "id": call_id,
             "type": "function",
@@ -1816,7 +1831,9 @@ class ModelGateway:
         }
 
     @staticmethod
-    def _serialize_tool_output_for_model(output: dict[str, Any], max_len: int = 6000) -> str:
+    def _serialize_tool_output_for_model(
+        output: dict[str, Any], max_len: int = 6000
+    ) -> str:
         try:
             rendered = json.dumps(output, separators=(",", ":"), ensure_ascii=True)
         except TypeError:
@@ -2090,9 +2107,31 @@ class ModelGateway:
         return default
 
     @staticmethod
+    def _resolve_timeout(model: str) -> int:
+        """Return an appropriate HTTP timeout in seconds for the given model.
+
+        Reasoning models (detected via ``_is_reasoning_model``) need
+        significantly longer timeouts because they perform an extended
+        thinking phase before responding.  The default for reasoning models
+        is **120 s** (override with ``OVERMIND_REASONING_TIMEOUT_S``),
+        while regular models keep the legacy **10 s** default (override
+        with ``OVERMIND_OPENAI_TIMEOUT_S``).
+        """
+        if ModelGateway._is_reasoning_model(model):
+            return int(
+                os.getenv(
+                    "OVERMIND_REASONING_TIMEOUT_S",
+                    os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "120"),
+                )
+            )
+        return int(os.getenv("OVERMIND_OPENAI_TIMEOUT_S", "10"))
+
+    @staticmethod
     def _deepseek_thinking_mode() -> str | None:
         """Resolve optional DeepSeek thinking mode request setting."""
-        raw = str(os.getenv("OVERMIND_DEEPSEEK_THINKING_MODE", "") or "").strip().lower()
+        raw = (
+            str(os.getenv("OVERMIND_DEEPSEEK_THINKING_MODE", "") or "").strip().lower()
+        )
         if raw in {"enabled", "disabled"}:
             return raw
         return None
