@@ -1433,7 +1433,21 @@ async def settings_mcp_form(request: Request) -> HTMLResponse:
                 enabled=True,
             )
             upsert_mcp_local_server(payload)
-            settings_message = f"Saved MCP server '{server_id}'."
+            tool_prefix = f"mcp.{server_id}."
+            discovered = [
+                name
+                for name in _services().gateway.list_tool_names()
+                if name.startswith(tool_prefix)
+            ]
+            if discovered:
+                settings_message = (
+                    f"Saved MCP server '{server_id}' ({len(discovered)} tool(s) discovered)."
+                )
+            else:
+                settings_message = (
+                    f"Saved MCP server '{server_id}', but no tools were discovered. "
+                    "Use an absolute command path and verify the server can start quickly."
+                )
 
     return templates.TemplateResponse(
         request,

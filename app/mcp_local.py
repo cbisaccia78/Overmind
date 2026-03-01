@@ -10,6 +10,7 @@ import asyncio
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,8 @@ from typing import Any
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -206,12 +209,23 @@ def dump_local_mcp_servers(configs: list[LocalMcpServerConfig]) -> str:
 
 def discover_tools(
     config: LocalMcpServerConfig,
-    timeout_s: int = 8,
+    timeout_s: int | None = None,
 ) -> list[LocalMcpTool]:
     """Discover tools from a local MCP server."""
+    effective_timeout = timeout_s if isinstance(timeout_s, int) and timeout_s > 0 else 20
     try:
-        tools_payload = _run_coro(_discover_tools_async(config, timeout_s=timeout_s))
-    except Exception:
+        tools_payload = _run_coro(
+            _discover_tools_async(config, timeout_s=effective_timeout)
+        )
+    except Exception as exc:
+        _LOGGER.warning(
+            "MCP tool discovery failed for server '%s' (command=%r args=%r timeout=%ss): %s",
+            config.id,
+            config.command,
+            config.args,
+            effective_timeout,
+            exc,
+        )
         return []
 
     tools: list[LocalMcpTool] = []
