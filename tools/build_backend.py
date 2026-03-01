@@ -36,6 +36,8 @@ def main() -> None:
         f"{templates_dir}{data_sep}app/templates",
         "--add-data",
         f"{static_dir}{data_sep}app/static",
+        "--copy-metadata",
+        "fastmcp",
         str(entrypoint),
     ]
 
