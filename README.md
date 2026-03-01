@@ -8,24 +8,32 @@ It’s designed to feel like a control panel: create agents, start runs, see too
 
 ## Install
 
-The easiest way to use overmind is to download the latest release from the GitHub Releases page.
+The easiest way to use Overmind is to download the latest release from the GitHub Releases page.
 
-- AppImage: `Overmind-<version>.AppImage`
-  
+- Linux AppImage: `Overmind-<version>.AppImage`
 
   ```bash
   chmod +x Overmind-<version>.AppImage
   ./Overmind-<version>.AppImage
   ```
 
-- Debian/Ubuntu package: `overmind-desktop_<version>_amd64.deb`
-
+- Linux Debian/Ubuntu package: `overmind-desktop_<version>_amd64.deb`
 
   ```bash
   sudo apt install ./overmind-desktop_<version>_amd64.deb
   ```
 
-We currently only support Linux, so if you're on mac/windows you need to set up a linux VM.
+- macOS installer: `Overmind-<version>.dmg`
+
+  ```bash
+  open Overmind-<version>.dmg
+  ```
+
+  Then drag Overmind into the Applications folder.
+
+- Windows installer: `Overmind Setup <version>.exe`
+
+  Run the installer and follow the setup prompts.
 
 ## Configure Model Provider Keys (Desktop App)
 
@@ -51,6 +59,12 @@ make dev
 ```
 
 `make dev` launches the Electron desktop app and starts the Python backend automatically.
+
+On Windows (PowerShell), activate the virtual environment with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
 
 If you only want the API server during development:
 
@@ -121,7 +135,7 @@ SQLite tables implemented in [app/db.py](app/db.py):
 - `memory_items(id, collection, text, embedding, embedding_model, dims, metadata_json, created_at)`
 - `events(id, run_id, type, payload_json, ts)`
 
-## Packaging (Linux)
+## Packaging
 
 Build desktop distributables:
 
@@ -129,9 +143,21 @@ Build desktop distributables:
 make package
 ```
 
-This produces Linux artifacts in `dist/`:
+This produces Linux artifacts in `dist/` by default:
 - AppImage (`*.AppImage`)
 - Debian package (`*.deb`)
+
+Platform-specific packaging commands:
+
+```bash
+npm run dist:linux
+npm run dist:mac
+npm run dist:win
+```
+
+These produce:
+- macOS DMG + ZIP (`*.dmg`, `*-mac*.zip`)
+- Windows installer + ZIP (`*.exe`, `*-win*.zip`)
 
 To produce an unpacked build directory only:
 
@@ -147,10 +173,12 @@ To produce a release build and publish installers through GitHub Actions:
 
 1. Bump desktop version in `package.json` to match your next tag (for example: `0.1.3` with tag `v0.1.3`).
 2. Commit and push to `main`.
-3. Build locally to verify packaging succeeds:
+3. Build locally on the target OS to verify packaging succeeds:
 
 ```bash
-make package
+npm run dist:linux  # Linux
+npm run dist:mac    # macOS
+npm run dist:win    # Windows
 ```
 
 4. Create and push a version tag:
@@ -163,6 +191,10 @@ git push origin v0.1.3
 The `Release` workflow builds and uploads these assets to the GitHub Release:
 - `Overmind-<version>.AppImage`
 - `overmind-desktop_<version>_amd64.deb`
+- `Overmind-<version>.dmg`
+- `Overmind-<version>-mac*.zip`
+- `Overmind Setup <version>.exe`
+- `Overmind-<version>-win*.zip`
 
 To install those artifacts, see **Install (GitHub Releases)** above.
  

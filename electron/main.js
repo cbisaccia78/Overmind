@@ -22,16 +22,26 @@ function resolveBundledBackendPath() {
 
 function resolvePythonCommand() {
   if (process.env.OVERMIND_PYTHON) {
-    return process.env.OVERMIND_PYTHON;
+    return { command: process.env.OVERMIND_PYTHON, argsPrefix: [] };
   }
 
   const workspaceRoot = path.resolve(__dirname, "..");
-  const venvPython = path.join(workspaceRoot, ".venv", "bin", "python");
-  if (fs.existsSync(venvPython)) {
-    return venvPython;
+  const venvCandidates =
+    process.platform === "win32"
+      ? [path.join(workspaceRoot, ".venv", "Scripts", "python.exe"), path.join(workspaceRoot, ".venv", "python.exe")]
+      : [path.join(workspaceRoot, ".venv", "bin", "python"), path.join(workspaceRoot, ".venv", "bin", "python3")];
+
+  for (const candidate of venvCandidates) {
+    if (fs.existsSync(candidate)) {
+      return { command: candidate, argsPrefix: [] };
+    }
   }
 
-  return "python3";
+  if (process.platform === "win32") {
+    return { command: "py", argsPrefix: ["-3"] };
+  }
+
+  return { command: "python3", argsPrefix: [] };
 }
 
 function startBackend() {
@@ -41,10 +51,11 @@ function startBackend() {
   fs.mkdirSync(defaultWorkspace, { recursive: true });
 
   const bundledBackendPath = app.isPackaged ? resolveBundledBackendPath() : null;
-  const command = bundledBackendPath || resolvePythonCommand();
+  const pythonRuntime = bundledBackendPath ? null : resolvePythonCommand();
+  const command = bundledBackendPath || pythonRuntime.command;
   const args = bundledBackendPath
     ? ["--host", HOST, "--port", String(PORT)]
-    : ["-m", "uvicorn", "app.main:app", "--host", HOST, "--port", String(PORT)];
+    : [...pythonRuntime.argsPrefix, "-m", "uvicorn", "app.main:app", "--host", HOST, "--port", String(PORT)];
 
   backendProcess = spawn(command, args, {
     cwd: workspaceRoot,

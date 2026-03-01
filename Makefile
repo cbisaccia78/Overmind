@@ -1,6 +1,12 @@
-.PHONY: dev api-dev package package-unpacked test test-cov test-full
+.PHONY: dev api-dev package package-linux package-mac package-win package-unpacked test test-cov test-full
 
 DEV_DB ?= data/overmind.db
+
+ifeq ($(OS),Windows_NT)
+VENV_PYTHON ?= .venv/Scripts/python.exe
+else
+VENV_PYTHON ?= .venv/bin/python
+endif
 
 
 dev:
@@ -13,13 +19,29 @@ api-dev:
 
 
 package:
-	.venv/bin/pip install -e .[dev]
+	$(MAKE) package-linux
+
+
+package-linux:
+	$(VENV_PYTHON) -m pip install -e .[dev]
 	npm install
-	npm run dist
+	npm run dist:linux
+
+
+package-mac:
+	$(VENV_PYTHON) -m pip install -e .[dev]
+	npm install
+	npm run dist:mac
+
+
+package-win:
+	$(VENV_PYTHON) -m pip install -e .[dev]
+	npm install
+	npm run dist:win
 
 
 package-unpacked:
-	.venv/bin/pip install -e .[dev]
+	$(VENV_PYTHON) -m pip install -e .[dev]
 	npm install
 	npm run pack
 

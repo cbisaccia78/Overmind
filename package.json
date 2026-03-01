@@ -10,9 +10,12 @@
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
-    "build:backend": "./.venv/bin/python tools/build_backend.py",
+    "build:backend": "node tools/run_build_backend.js",
     "pack": "npm run build:backend && electron-builder --dir --publish never",
-    "dist": "npm run build:backend && electron-builder --linux AppImage deb --publish never"
+    "dist": "npm run dist:linux",
+    "dist:linux": "npm run build:backend && electron-builder --linux AppImage deb --publish never",
+    "dist:mac": "npm run build:backend && electron-builder --mac dmg zip --publish never",
+    "dist:win": "npm run build:backend && electron-builder --win nsis zip --publish never"
   },
   "devDependencies": {
     "electron": "^32.3.3",
@@ -30,8 +33,11 @@
     ],
     "extraResources": [
       {
-        "from": "build/backend/overmind-backend",
-        "to": "backend/overmind-backend"
+        "from": "build/backend",
+        "to": "backend",
+        "filter": [
+          "overmind-backend*"
+        ]
       }
     ],
     "linux": {
@@ -41,6 +47,19 @@
       ],
       "maintainer": "Cole Bisaccia <cbisaccia78@gmail.com>",
       "category": "Development"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
     },
     "deb": {
       "afterInstall": "packaging/deb-after-install.sh"
