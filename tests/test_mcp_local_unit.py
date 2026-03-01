@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -67,6 +68,46 @@ def test_parse_and_dump_local_mcp_servers() -> None:
     payload = json.loads(dumped)
     assert payload[0]["id"] == "server-a"
     assert payload[1]["id"] == "server-b"
+
+
+def test_build_transport_env_prepends_absolute_command_dir_with_node(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_bin = tmp_path / "node"
+    node_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    config = mcp_local.LocalMcpServerConfig(
+        id="playwright",
+        command=str(tmp_path / "npx"),
+        args=["-y", "@playwright/mcp@latest"],
+        env={},
+        enabled=True,
+    )
+
+    env = mcp_local._build_transport_env(config)
+    assert env["PATH"].split(os.pathsep)[0] == str(tmp_path)
+
+
+def test_build_transport_env_respects_explicit_path_override(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_bin = tmp_path / "node"
+    node_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    config = mcp_local.LocalMcpServerConfig(
+        id="playwright",
+        command=str(tmp_path / "npx"),
+        args=["-y", "@playwright/mcp@latest"],
+        env={"PATH": "/custom/bin"},
+        enabled=True,
+    )
+
+    env = mcp_local._build_transport_env(config)
+    assert env["PATH"].split(os.pathsep)[:2] == [str(tmp_path), "/custom/bin"]
 
 
 def test_discover_tools_normalizes_and_handles_failures(

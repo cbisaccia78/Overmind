@@ -689,13 +689,37 @@ def _build_client(
     timeout_s: int,
     cwd: str | None = None,
 ) -> Client:
+    env = _build_transport_env(config)
     transport = StdioTransport(
         command=config.command,
         args=config.args,
-        env={**os.environ, **config.env},
+        env=env,
         cwd=cwd,
     )
     return Client(transport=transport, timeout=timeout_s)
+
+
+def _build_transport_env(config: LocalMcpServerConfig) -> dict[str, str]:
+    """Build environment for local MCP stdio transport.
+
+    For absolute command paths that sit alongside a `node` binary (common with
+    nvm-managed Node.js), prepend that directory to PATH so script launchers
+    like `npx` can resolve `/usr/bin/env node` reliably in GUI app contexts.
+    """
+    env = {**os.environ, **config.env}
+    command_dir = os.path.dirname(config.command) if os.path.isabs(config.command) else ""
+    if command_dir:
+        node_path = os.path.join(command_dir, "node")
+        if os.path.isfile(node_path):
+            current_path = str(env.get("PATH") or "")
+            parts = [part for part in current_path.split(os.pathsep) if part]
+            if command_dir not in parts:
+                env["PATH"] = (
+                    f"{command_dir}{os.pathsep}{current_path}"
+                    if current_path
+                    else command_dir
+                )
+    return env
 
 
 async def _discover_tools_async(
