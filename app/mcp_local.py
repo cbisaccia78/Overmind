@@ -380,7 +380,8 @@ def _build_structured_observation(
     page_url = _extract_page_field(normalized, "page url")
     page_title = _extract_page_field(normalized, "page title")
     console_errors, console_warnings = _extract_console_counts(normalized)
-    actions = _extract_action_candidates(normalized)
+    action_targets = _extract_action_targets(normalized)
+    actions = [item.get("label") for item in action_targets if item.get("label")]
     text = _compact_observation_text(normalized)
 
     summary_bits = [f"MCP tool `{remote_name}` completed."]
@@ -395,7 +396,11 @@ def _build_structured_observation(
             f"{console_errors if console_errors is not None else '?'} errors, "
             f"{console_warnings if console_warnings is not None else '?'} warnings."
         )
-    if actions:
+    if action_targets:
+        shown = ", ".join(_format_action_target(item) for item in action_targets[:4])
+        suffix = "..." if len(actions) > 4 else ""
+        summary_bits.append(f"Interactive targets: {shown}{suffix}.")
+    elif actions:
         shown = ", ".join(actions[:4])
         suffix = "..." if len(actions) > 4 else ""
         summary_bits.append(f"Interactive targets: {shown}{suffix}.")
@@ -421,6 +426,8 @@ def _build_structured_observation(
         observation["sections"] = sections[:8]
     if actions:
         observation["action_candidates"] = actions[:12]
+    if action_targets:
+        observation["action_targets"] = action_targets[:12]
     if text:
         observation["text"] = text
     return observation
@@ -541,20 +548,52 @@ def _extract_console_counts(text: str) -> tuple[int | None, int | None]:
     return errors, warnings
 
 
-def _extract_action_candidates(text: str) -> list[str]:
-    """Extract likely interactive labels from snapshot text."""
-    labels: list[str] = []
+def _extract_action_targets(text: str) -> list[dict[str, str]]:
+    """Extract likely interactive labels plus refs from snapshot text."""
+    targets: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
     pattern = re.compile(
-        r'\b(?:button|link|textbox|tab|menuitem)\s+"([^"]+)"', flags=re.IGNORECASE
+        (
+            r'\b(button|link|textbox|tab|menuitem|checkbox|radio|combobox|option)\b'
+            r'(?:\s+"([^"]+)")?'
+            r'(?:\s+\[ref=([^\]]+)\])?'
+        ),
+        flags=re.IGNORECASE,
     )
     for match in pattern.finditer(text):
-        label = match.group(1).strip()
-        if not label:
+        role = match.group(1).strip().lower()
+        label = str(match.group(2) or "").strip()
+        ref = str(match.group(3) or "").strip()
+        if not label and not ref:
             continue
         if len(label) > 80:
             continue
-        labels.append(label)
-    return _unique_preserve_order(labels)
+        key = (role, label, ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = {"role": role}
+        if label:
+            item["label"] = label
+        if ref:
+            item["ref"] = ref
+        targets.append(item)
+    return targets
+
+
+def _format_action_target(target: dict[str, str]) -> str:
+    """Render one structured action target into compact prompt text."""
+    role = str(target.get("role") or "").strip()
+    label = str(target.get("label") or "").strip()
+    ref = str(target.get("ref") or "").strip()
+    bits: list[str] = []
+    if role:
+        bits.append(role)
+    if label:
+        bits.append(f'"{label}"')
+    if ref:
+        bits.append(f"[ref={ref}]")
+    return " ".join(bits).strip()
 
 
 def _compact_observation_text(text: str, max_chars: int = 1200) -> str:

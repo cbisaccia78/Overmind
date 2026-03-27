@@ -256,8 +256,8 @@ def test_structured_observation_extracts_generic_page_metadata() -> None:
         "- Console: 1 errors, 2 warnings\\n"
         "### Snapshot\\n"
         "```yaml\\n"
-        "- button \"Post\"\\n"
-        "- link \"Home\"\\n"
+        "- button \"Post\" [ref=e12]\\n"
+        "- link \"Home\" [ref=e15]\\n"
         "```')], isError=False)"
     )
     observation = mcp_local._build_structured_observation(
@@ -272,7 +272,11 @@ def test_structured_observation_extracts_generic_page_metadata() -> None:
     assert observation["sections"][:2] == ["Page", "Snapshot"]
     assert "Post" in observation["action_candidates"]
     assert "Home" in observation["action_candidates"]
-    assert "- button \"Post\"" not in observation["text"]
+    assert observation["action_targets"][:2] == [
+        {"role": "button", "label": "Post", "ref": "e12"},
+        {"role": "link", "label": "Home", "ref": "e15"},
+    ]
+    assert "- button \"Post\" [ref=e12]" not in observation["text"]
 
 
 def test_normalize_mcp_text_unwraps_textcontent_with_trailing_fields() -> None:

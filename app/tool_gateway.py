@@ -219,11 +219,16 @@ class ToolGateway:
                     run_id=run_id,
                     server_id=config.id,
                 )
-            return call_local_mcp_tool(
+            result = call_local_mcp_tool(
                 config=config,
                 remote_name=remote_tool_name,
                 args=args,
                 session_key=session_key,
+                session_cwd=session_cwd,
+            )
+            return self._attach_mcp_artifacts(
+                result=result,
+                args=args,
                 session_cwd=session_cwd,
             )
 
@@ -252,6 +257,71 @@ class ToolGateway:
             raise ValueError("artifact directory escapes workspace")
         target.mkdir(parents=True, exist_ok=True)
         return str(target)
+
+    def _resolve_mcp_artifact_path(
+        self, *, session_cwd: str, artifact_name: str
+    ) -> Path | None:
+        """Resolve one MCP-created artifact path inside the session cwd."""
+        rel_name = str(artifact_name or "").strip()
+        if not rel_name:
+            return None
+        candidate = (Path(session_cwd) / rel_name).resolve()
+        base = Path(session_cwd).resolve()
+        if not str(candidate).startswith(str(base)):
+            return None
+        return candidate
+
+    def _attach_mcp_artifacts(
+        self,
+        *,
+        result: dict[str, Any],
+        args: dict[str, Any],
+        session_cwd: str | None,
+    ) -> dict[str, Any]:
+        """Attach workspace-visible artifact paths for MCP tools that save files."""
+        if not session_cwd or not isinstance(result, dict):
+            return result
+
+        filenames: list[str] = []
+        for key in ("filename", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                filenames.append(value.strip())
+        raw_paths = args.get("paths")
+        if isinstance(raw_paths, list):
+            for value in raw_paths:
+                if isinstance(value, str) and value.strip():
+                    filenames.append(value.strip())
+
+        artifacts: list[str] = []
+        for name in filenames:
+            resolved = self._resolve_mcp_artifact_path(
+                session_cwd=session_cwd,
+                artifact_name=name,
+            )
+            if resolved is None:
+                continue
+            artifacts.append(str(resolved.relative_to(self.workspace_root)))
+        if not artifacts:
+            return result
+
+        unique_artifacts: list[str] = []
+        seen: set[str] = set()
+        for item in artifacts:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique_artifacts.append(item)
+
+        updated = dict(result)
+        updated["artifacts"] = unique_artifacts
+
+        observation = updated.get("observation")
+        if isinstance(observation, dict):
+            updated_observation = dict(observation)
+            updated_observation["saved_artifacts"] = unique_artifacts
+            updated["observation"] = updated_observation
+        return updated
 
     def list_local_mcp_servers(self) -> list[LocalMcpServerConfig]:
         """Return local MCP server configs from app settings."""
@@ -589,6 +659,8 @@ class ToolGateway:
                     run_id=run_id,
                     session_key=mcp_session_key,
                 )
+            if tool_name == "read_file":
+                return self._handle_read_file(validated, run_id=run_id)
             return spec.handler(validated)
 
         if tool_name.startswith("mcp."):
@@ -597,6 +669,8 @@ class ToolGateway:
                 run_id=run_id,
                 session_key=mcp_session_key,
             )
+        if tool_name == "read_file":
+            return self._handle_read_file(args, run_id=run_id)
         return spec.handler(args)
 
     def _validate_args(self, spec: ToolSpec, args: dict[str, Any]) -> dict[str, Any]:
@@ -691,8 +765,41 @@ class ToolGateway:
             write_subdir=args["write_subdir"],
         )
 
-    def _handle_read_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        path = self._safe_path(args["path"])
+    def _resolve_read_path(self, rel_path: str, *, run_id: str | None = None) -> Path:
+        """Resolve a readable file path, including per-run MCP artifacts."""
+        path = self._safe_path(rel_path)
+        if path.exists() and path.is_file():
+            return path
+        if not run_id:
+            return path
+
+        artifact_root = (
+            self.workspace_root
+            / ".overmind_runs"
+            / self._safe_path_component(run_id, fallback="run")
+            / "artifacts"
+            / "mcp"
+        )
+        if not artifact_root.exists() or not artifact_root.is_dir():
+            return path
+
+        matches: list[Path] = []
+        for child in artifact_root.iterdir():
+            if not child.is_dir():
+                continue
+            candidate = (child / rel_path).resolve()
+            if not str(candidate).startswith(str(child.resolve())):
+                continue
+            if candidate.exists() and candidate.is_file():
+                matches.append(candidate)
+        if len(matches) == 1:
+            return matches[0]
+        return path
+
+    def _handle_read_file(
+        self, args: dict[str, Any], run_id: str | None = None
+    ) -> dict[str, Any]:
+        path = self._resolve_read_path(args["path"], run_id=run_id)
         if not path.exists() or not path.is_file():
             return {
                 "ok": False,

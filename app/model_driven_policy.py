@@ -873,11 +873,44 @@ class ModelDrivenPolicy(Policy):
                 )
 
             action_candidates = list(observation.get("action_candidates") or [])
+            action_targets = list(observation.get("action_targets") or [])
+            if action_targets:
+                rendered_targets: list[str] = []
+                for item in action_targets[:4]:
+                    if not isinstance(item, dict):
+                        continue
+                    role = str(item.get("role") or "").strip()
+                    label = str(item.get("label") or "").strip()
+                    ref = str(item.get("ref") or "").strip()
+                    bits: list[str] = []
+                    if role:
+                        bits.append(role)
+                    if label:
+                        bits.append(f'"{label}"')
+                    if ref:
+                        bits.append(f"[ref={ref}]")
+                    rendered = " ".join(bits).strip()
+                    if rendered:
+                        rendered_targets.append(rendered)
+                if rendered_targets:
+                    suffix = ", ..." if len(action_targets) > 4 else ""
+                    lines.append(
+                        "- Interactive targets with refs: "
+                        + ", ".join(rendered_targets)
+                        + suffix
+                    )
             if action_candidates:
                 options = ", ".join(str(item) for item in action_candidates[:6])
                 if len(action_candidates) > 6:
                     options += ", ..."
                 lines.append(f"- Interactive options seen: {options}")
+
+            saved_artifacts = list(observation.get("saved_artifacts") or [])
+            if saved_artifacts:
+                paths = ", ".join(str(item) for item in saved_artifacts[:3])
+                if len(saved_artifacts) > 3:
+                    paths += ", ..."
+                lines.append(f"- Saved artifacts: {paths}")
 
             summary = str(observation.get("summary") or "").strip()
             if summary:

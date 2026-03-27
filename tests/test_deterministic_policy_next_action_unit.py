@@ -576,6 +576,13 @@ def test_followup_prompt_uses_structured_observation_for_state_not_raw_snapshot_
                         "page_title": "Example",
                         "page_url": "https://example.com",
                         "action_candidates": ["Home", "Post", "Notifications"],
+                        "action_targets": [
+                            {"role": "link", "label": "Home", "ref": "e1"},
+                            {"role": "button", "label": "Post", "ref": "e2"},
+                        ],
+                        "saved_artifacts": [
+                            ".overmind_runs/r1/artifacts/mcp/playwright/x_home_snapshot.md"
+                        ],
                     },
                     "mcp": {
                         "tool_name": "mcp.playwright.browser_snapshot",
@@ -592,7 +599,9 @@ def test_followup_prompt_uses_structured_observation_for_state_not_raw_snapshot_
 
     prompt = gateway.calls[0]["task"]
     assert "Current page: Example (https://example.com)" in prompt
+    assert 'Interactive targets with refs: link "Home" [ref=e1], button "Post" [ref=e2]' in prompt
     assert "Interactive options seen: Home, Post, Notifications" in prompt
+    assert "Saved artifacts: .overmind_runs/r1/artifacts/mcp/playwright/x_home_snapshot.md" in prompt
     assert "### Snapshot" not in prompt
     assert "Timeline: Your Home Timeline" not in prompt
 

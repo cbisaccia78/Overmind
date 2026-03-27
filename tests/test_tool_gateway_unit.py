@@ -167,6 +167,38 @@ def test_dispatch_strict_schema_validation(tmp_path: Path):
     assert unknown_arg["error"]["code"] == "bad_args"
 
 
+def test_read_file_resolves_single_mcp_artifact_for_run(tmp_path: Path):
+    gateway = _gateway(tmp_path)
+    artifact = (
+        tmp_path
+        / ".overmind_runs"
+        / "run-123"
+        / "artifacts"
+        / "mcp"
+        / "playwright"
+        / "x_home_snapshot.md"
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("snapshot", encoding="utf-8")
+
+    read_ok = gateway._dispatch(
+        "read_file",
+        {"path": "x_home_snapshot.md"},
+        run_id="run-123",
+    )
+
+    assert read_ok["ok"] is True
+    assert read_ok["path"] == str(
+        Path(".overmind_runs")
+        / "run-123"
+        / "artifacts"
+        / "mcp"
+        / "playwright"
+        / "x_home_snapshot.md"
+    )
+    assert read_ok["content"] == "snapshot"
+
+
 def test_list_openai_tools_renders_json_schema(tmp_path: Path):
     gateway = _gateway(tmp_path)
 
@@ -233,7 +265,7 @@ def test_mcp_dispatch_passes_run_id_as_session_key(tmp_path: Path, monkeypatch):
                 "timeout_s": timeout_s,
             }
         )
-        return {"ok": True}
+        return {"ok": True, "observation": {"summary": "snapshot ok"}}
 
     monkeypatch.setattr("app.tool_gateway.call_local_mcp_tool", _fake_call_tool)
 
@@ -254,6 +286,10 @@ def test_mcp_dispatch_passes_run_id_as_session_key(tmp_path: Path, monkeypatch):
     )
 
     assert result["ok"] is True
+    assert result["artifacts"] == [
+        ".overmind_runs/run-123/artifacts/mcp/browser/x.png"
+    ]
+    assert result["observation"]["saved_artifacts"] == result["artifacts"]
     assert calls and calls[0]["session_key"] == "run-123"
     expected_cwd = (
         tmp_path / ".overmind_runs" / "run-123" / "artifacts" / "mcp" / "browser"
